@@ -1,5 +1,10 @@
 # Commander Canvas — GitHub Pages Edition
 
+## GitHub Pages 404 방지
+
+압축을 풀면 `.github`, `public`, `scripts`, `package.json`, `index.html`이 바로 보여야 합니다. 이 파일들을 저장소 루트에 올리세요. 상위 폴더나 ZIP 파일만 저장소에 올리면 Pages가 진입 파일을 찾지 못합니다. 자세한 확인 절차는 `CHECK_404.md`를 참고하세요.
+
+
 Scryfall 카드 데이터로 커맨더 덱을 드래그 앤 드롭 방식으로 구성하는 정적 웹앱입니다.
 
 이 버전은 **GitHub Pages에 바로 배포**할 수 있도록 Node 백엔드 의존성을 제거했습니다.

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Commander Canvas</title>
+  <script>
+    (() => {
+      const path = location.pathname;
+      const publicAt = path.indexOf('/public/');
+      if (publicAt >= 0) {
+        location.replace(path.slice(0, publicAt + 8));
+        return;
+      }
+      const parts = path.split('/').filter(Boolean);
+      const base = parts.length ? `/${parts[0]}/` : '/';
+      location.replace(base);
+    })();
+  </script>
+</head>
+<body><p>메인 페이지로 이동 중입니다.</p></body>
+</html>
