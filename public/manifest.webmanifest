@@ -1,0 +1,10 @@
+{
+  "name": "Commander Canvas",
+  "short_name": "Commander Canvas",
+  "description": "Scryfall 기반 드래그 앤 드롭 커맨더 덱 빌더",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#10131a",
+  "theme_color": "#10131a"
+}

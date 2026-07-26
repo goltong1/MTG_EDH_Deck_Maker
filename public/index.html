@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Scryfall API 기반 드래그 앤 드롭 커맨더 덱 빌더" />
+  <title>Commander Canvas</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <meta name="theme-color" content="#10131a" />
+  <link rel="preconnect" href="https://cards.scryfall.io" crossorigin />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">CC</div>
+      <div>
+        <h1>Commander Canvas</h1>
+        <p>Scryfall 기반 드래그 앤 드롭 덱 빌더</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="btn ghost" id="newDeckBtn">새 덱</button>
+      <button class="btn ghost" id="importBtn">가져오기</button>
+      <button class="btn ghost" id="exportBtn">내보내기</button>
+      <button class="btn ghost" id="localDbBtn">카드 DB</button>
+      <button class="btn primary" id="saveBtn">브라우저에 저장</button>
+    </div>
+  </header>
+
+  <main class="app-shell">
+    <aside class="search-panel panel">
+      <div class="panel-heading">
+        <div>
+          <span class="eyebrow">CARD LIBRARY</span>
+          <h2>카드 검색</h2>
+        </div>
+        <button class="icon-btn" id="collapseSearchBtn" title="검색창 접기" aria-label="검색창 접기">‹</button>
+      </div>
+
+      <form id="searchForm" class="search-form">
+        <div class="search-box">
+          <input id="searchInput" type="search" autocomplete="off" placeholder="이름, 유형, 오라클 텍스트 또는 Scryfall 문법" />
+          <button type="submit" aria-label="검색">⌕</button>
+        </div>
+        <div id="suggestions" class="suggestions hidden"></div>
+
+        <div class="filter-row">
+          <label class="check"><input id="legalOnly" type="checkbox" checked /> 커맨더 사용 가능</label>
+          <select id="searchSource" aria-label="검색 데이터 소스">
+            <option value="auto">자동 · 브라우저 DB 우선</option>
+            <option value="local">브라우저 DB만</option>
+            <option value="online">Scryfall 온라인</option>
+          </select>
+          <select id="languageFilter" aria-label="언어 필터">
+            <option value="">모든 언어</option>
+            <option value="en">영어판</option>
+            <option value="ko">한국어판</option>
+            <option value="ja">일본어판</option>
+          </select>
+        </div>
+        <div class="quick-filters" id="quickFilters">
+          <button type="button" data-query="t:legendary t:creature">커맨더</button>
+          <button type="button" data-query="t:creature">생물</button>
+          <button type="button" data-query="t:instant">순간마법</button>
+          <button type="button" data-query="t:sorcery">집중마법</button>
+          <button type="button" data-query="t:land">대지</button>
+          <button type="button" data-query="order:edhrec">EDH 인기</button>
+        </div>
+      </form>
+
+      <div class="local-db-strip" id="localDbStrip">
+        <span class="status-dot" id="localDbDot"></span>
+        <span id="localDbMiniStatus">브라우저 카드 DB 확인 중</span>
+        <button type="button" id="localDbMiniBtn">관리</button>
+      </div>
+
+      <div class="search-meta">
+        <span id="resultCount">검색 준비 완료</span>
+        <div class="view-switch" role="group" aria-label="보기 방식">
+          <button class="active" data-view="grid" title="이미지 보기">▦</button>
+          <button data-view="list" title="목록 보기">☷</button>
+        </div>
+      </div>
+
+      <div id="searchResults" class="card-results grid-view" aria-live="polite"></div>
+      <div id="searchEmpty" class="empty-state">
+        <div class="empty-orb">✦</div>
+        <h3>덱에 들어갈 카드를 찾아보세요</h3>
+        <p>카드를 드래그하거나 더블클릭하면 덱에 추가됩니다.</p>
+      </div>
+      <div class="pagination hidden" id="pagination">
+        <button class="btn ghost" id="prevPageBtn">이전</button>
+        <span id="pageLabel">1페이지</span>
+        <button class="btn ghost" id="nextPageBtn">다음</button>
+      </div>
+    </aside>
+
+    <section class="workspace">
+      <div class="deck-toolbar panel">
+        <div class="deck-title-wrap">
+          <input id="deckName" value="새 커맨더 덱" aria-label="덱 이름" />
+          <div class="deck-subline">
+            <span id="autosaveStatus">저장되지 않은 변경사항 없음</span>
+            <span class="dot">•</span>
+            <span id="deckIdentity">색 정체성: 미지정</span>
+          </div>
+        </div>
+        <div class="deck-stats-inline">
+          <div><strong id="totalCount">0</strong><span>/ 100장</span></div>
+          <div><strong id="avgMana">0.00</strong><span>평균 MV</span></div>
+          <div><strong id="landCount">0</strong><span>대지</span></div>
+        </div>
+      </div>
+
+      <div class="commander-zone panel drop-zone" data-section="commander">
+        <div class="zone-label">
+          <span class="crown">♛</span>
+          <div><span class="eyebrow">COMMAND ZONE</span><h2>커맨더</h2></div>
+          <span class="zone-count" id="commanderCount">0 / 1–2</span>
+        </div>
+        <div id="commanderCards" class="commander-cards"></div>
+        <div id="commanderPlaceholder" class="drop-placeholder">
+          <strong>전설적 생물을 여기에 놓으세요</strong>
+          <span>Partner, Background 등 2인 커맨더 조합도 지원합니다.</span>
+        </div>
+      </div>
+
+      <div class="deck-layout">
+        <div class="deck-board panel">
+          <div class="board-heading">
+            <div>
+              <span class="eyebrow">MAIN DECK</span>
+              <h2>덱 구성</h2>
+            </div>
+            <div class="board-controls">
+              <button class="btn small ghost" id="sortDeckBtn">자동 정렬</button>
+              <button class="btn small danger-outline" id="clearDeckBtn">덱 비우기</button>
+            </div>
+          </div>
+          <div id="deckSections" class="deck-sections"></div>
+          <div id="trashZone" class="trash-zone" aria-label="카드 삭제 영역">🗑 카드를 여기에 놓아 제거</div>
+        </div>
+
+        <aside class="inspector-column">
+          <div class="panel validation-card">
+            <div class="panel-heading compact">
+              <div><span class="eyebrow">DECK CHECK</span><h2>규칙 검사</h2></div>
+              <span id="validityBadge" class="status-badge neutral">작성 중</span>
+            </div>
+            <div id="validationSummary" class="validation-summary"></div>
+            <ul id="validationIssues" class="validation-issues"></ul>
+          </div>
+
+          <div class="panel analytics-card">
+            <div class="panel-heading compact">
+              <div><span class="eyebrow">ANALYTICS</span><h2>마나 커브</h2></div>
+            </div>
+            <div id="manaCurve" class="mana-curve"></div>
+            <div class="type-breakdown" id="typeBreakdown"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+  <dialog id="cardDialog" class="card-dialog">
+    <button class="dialog-close" data-close-dialog aria-label="닫기">×</button>
+    <div id="cardDialogContent"></div>
+  </dialog>
+
+  <dialog id="textDialog" class="text-dialog">
+    <form method="dialog" class="dialog-shell">
+      <div class="dialog-header">
+        <div><span class="eyebrow" id="textDialogEyebrow">DECK DATA</span><h2 id="textDialogTitle">덱 가져오기</h2></div>
+        <button class="dialog-close" value="cancel" aria-label="닫기">×</button>
+      </div>
+      <p id="textDialogHelp"></p>
+      <div id="exportFormatRow" class="export-format-row hidden">
+        <label for="exportFormat">출력 형식</label>
+        <select id="exportFormat">
+          <option value="arena">MTG Arena</option>
+          <option value="moxfield">Moxfield</option>
+          <option value="plain">구역별 일반 텍스트</option>
+        </select>
+      </div>
+      <textarea id="deckTextArea" spellcheck="false"></textarea>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel">취소</button>
+        <button class="btn ghost hidden" id="downloadDeckTextBtn" type="button">TXT 저장</button>
+        <button class="btn primary" id="textDialogConfirm" value="default">확인</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="localDbDialog" class="text-dialog local-db-dialog">
+    <form method="dialog" class="dialog-shell">
+      <div class="dialog-header">
+        <div><span class="eyebrow">BROWSER CARD LIBRARY</span><h2>브라우저 카드 DB</h2></div>
+        <button class="dialog-close" value="cancel" aria-label="닫기">×</button>
+      </div>
+      <p>GitHub Actions가 생성한 Oracle Cards 압축 DB를 이 브라우저의 IndexedDB에 저장합니다. 설치 후 일반 검색과 자동완성은 Scryfall 연결 없이 처리됩니다.</p>
+      <div class="db-status-card">
+        <div><span>상태</span><strong id="localDbStatusText">확인 중</strong></div>
+        <div><span>카드 수</span><strong id="localDbCardCount">-</strong></div>
+        <div><span>데이터 생성</span><strong id="localDbBuiltAt">-</strong></div>
+        <div><span>Scryfall 갱신</span><strong id="localDbSourceAt">-</strong></div>
+      </div>
+      <div class="db-options">
+        <label class="check"><input id="localDbAutoUpdate" type="checkbox" /> 주기적으로 자동 업데이트</label>
+        <label>
+          확인 주기
+          <select id="localDbAutoDays">
+            <option value="1">매일</option>
+            <option value="3">3일마다</option>
+            <option value="7">7일마다</option>
+            <option value="14">14일마다</option>
+          </select>
+        </label>
+      </div>
+      <div class="db-note">
+        <strong>브라우저 검색 범위</strong>
+        <span>카드명, 유형, 오라클 텍스트, 색·색 정체성, 마나 값, 세트, 희귀도, Commander 합법성 및 주요 Scryfall 연산자를 지원합니다. 한국어·일본어 인쇄본 검색과 복잡한 OR 구문은 온라인 검색을 사용합니다.</span>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel">닫기</button>
+        <button class="btn ghost" id="saveLocalDbConfigBtn" type="button">설정 저장</button>
+        <button class="btn primary" id="updateLocalDbBtn" type="button">지금 업데이트</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="sectionTemplate">
+    <section class="deck-section drop-zone">
+      <button class="section-header" type="button">
+        <span class="section-icon"></span>
+        <span class="section-name"></span>
+        <span class="section-count"></span>
+        <span class="section-chevron">⌄</span>
+      </button>
+      <div class="section-body"></div>
+    </section>
+  </template>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "object": "commander_canvas_card_database",
+  "ready": false,
+  "version": null,
+  "sourceUpdatedAt": null,
+  "builtAt": null,
+  "checkedAt": null,
+  "cardCount": 0,
+  "compressedBytes": 0,
+  "downloadPath": "./data/cards.json.gz",
+  "message": "Run npm run build:data or deploy through GitHub Actions to generate the card database."
+}
