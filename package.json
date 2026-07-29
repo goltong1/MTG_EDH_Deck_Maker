@@ -1,14 +1,14 @@
 {
-  "name": "commander-canvas-github-pages",
-  "version": "3.0.0",
+  "name": "deck-canvas-github-pages",
+  "version": "4.0.0",
   "private": true,
   "type": "module",
-  "description": "Static GitHub Pages Commander deck builder with a browser-cached Scryfall card database",
+  "description": "Static GitHub Pages MTG deck builder for Commander and major 60-card Constructed formats",
   "scripts": {
     "dev": "node dev-server.mjs",
     "start": "node dev-server.mjs",
     "build:data": "node scripts/build-card-db.mjs",
-    "check": "node --check public/app.js && node --check public/service-worker.js && node --check scripts/build-card-db.mjs"
+    "check": "node --check public/app.js && node --check public/deck-rules.js && node --check public/service-worker.js && node --check scripts/build-card-db.mjs && node tests/deck-rules.test.mjs"
   },
   "engines": {
     "node": ">=20"

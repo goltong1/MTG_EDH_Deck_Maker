@@ -1,3 +1,5 @@
+import { FORMAT_DEFS, formatConfig, cardCopyLimit, isFormatPlayableStatus, legalityStatus, groupedNameCounts } from './deck-rules.js';
+
 const SECTION_DEFS = [
   ['creature', '생물', '♞'],
   ['instant', '순간마법', 'ϟ'],
@@ -25,7 +27,9 @@ let scryfallRequestChain = Promise.resolve();
 let nextScryfallRequestAt = 0;
 const state = {
   deckName: '새 커맨더 덱',
+  format: 'commander',
   commanders: [],
+  sideboard: [],
   sections: Object.fromEntries(SECTION_DEFS.map(([id]) => [id, []])),
   searchResults: [],
   searchMap: new Map(),
@@ -49,9 +53,12 @@ const elements = {
   searchEmpty: el('searchEmpty'), resultCount: el('resultCount'), pagination: el('pagination'),
   prevPageBtn: el('prevPageBtn'), nextPageBtn: el('nextPageBtn'), pageLabel: el('pageLabel'),
   legalOnly: el('legalOnly'), languageFilter: el('languageFilter'), searchSource: el('searchSource'), suggestions: el('suggestions'),
-  deckSections: el('deckSections'), commanderCards: el('commanderCards'), commanderPlaceholder: el('commanderPlaceholder'),
+  deckSections: el('deckSections'), commanderZone: el('commanderZone'), commanderCards: el('commanderCards'), commanderPlaceholder: el('commanderPlaceholder'),
+  sideboardZone: el('sideboardZone'), sideboardCards: el('sideboardCards'), sideboardPlaceholder: el('sideboardPlaceholder'),
   deckName: el('deckName'), totalCount: el('totalCount'), avgMana: el('avgMana'), landCount: el('landCount'),
-  commanderCount: el('commanderCount'), deckIdentity: el('deckIdentity'), autosaveStatus: el('autosaveStatus'),
+  commanderCount: el('commanderCount'), sideboardCount: el('sideboardCount'), deckIdentity: el('deckIdentity'), autosaveStatus: el('autosaveStatus'),
+  deckFormat: el('deckFormat'), formatRuleHint: el('formatRuleHint'), totalTargetLabel: el('totalTargetLabel'), legalOnlyLabel: el('legalOnlyLabel'),
+  commanderQuickFilter: el('commanderQuickFilter'), popularQuickFilter: el('popularQuickFilter'), mainDeckHeading: el('mainDeckHeading'),
   validationSummary: el('validationSummary'), validationIssues: el('validationIssues'), validityBadge: el('validityBadge'),
   manaCurve: el('manaCurve'), typeBreakdown: el('typeBreakdown'), toastStack: el('toastStack'),
   cardDialog: el('cardDialog'), cardDialogContent: el('cardDialogContent'), textDialog: el('textDialog'),
@@ -80,11 +87,14 @@ function cardImage(card, size = 'normal') {
 function cardName(card) { return card.name || card.card_faces?.map(face => face.name).join(' // ') || '이름 없음'; }
 function entryKey(card) { return card.oracle_id || card.id || cardName(card).toLowerCase(); }
 function isBasicLand(card) { return /Basic Land/i.test(card.type_line || ''); }
-function allowsMultiple(card) { return isBasicLand(card) || /A deck can have (?:any number|up to)/i.test(cardOracle(card)); }
+function currentFormat() { return formatConfig(state.format); }
+function isCommanderMode() { return currentFormat().mode === 'commander'; }
+function allowsMultiple(card) { return cardCopyLimit(card, state.format) > 1; }
 function totalEntryQty(entries) { return entries.reduce((sum, entry) => sum + entry.qty, 0); }
-function allEntries() { return [...state.commanders, ...Object.values(state.sections).flat()]; }
 function allMainEntries() { return Object.values(state.sections).flat(); }
+function allEntries() { return isCommanderMode() ? [...state.commanders, ...allMainEntries()] : [...allMainEntries(), ...state.sideboard]; }
 function allCardsExpanded() { return allEntries().flatMap(entry => Array.from({ length: entry.qty }, () => entry.card)); }
+function sideboardCardsExpanded() { return state.sideboard.flatMap(entry => Array.from({ length: entry.qty }, () => entry.card)); }
 
 function sectionForCard(card) {
   const type = card.type_line || '';
@@ -122,9 +132,11 @@ function markDirty() {
 
 function persistDeck(showToast = false) {
   const payload = {
-    version: 1,
+    version: 2,
     deckName: state.deckName,
+    format: state.format,
     commanders: state.commanders,
+    sideboard: state.sideboard,
     sections: state.sections,
     savedAt: new Date().toISOString()
   };
@@ -140,7 +152,9 @@ function loadSavedDeck() {
   try {
     const saved = JSON.parse(raw);
     state.deckName = saved.deckName || state.deckName;
+    state.format = FORMAT_DEFS[saved.format] ? saved.format : 'commander';
     state.commanders = Array.isArray(saved.commanders) ? saved.commanders : [];
+    state.sideboard = Array.isArray(saved.sideboard) ? saved.sideboard : [];
     for (const [id] of SECTION_DEFS) state.sections[id] = Array.isArray(saved.sections?.[id]) ? saved.sections[id] : [];
     elements.deckName.value = state.deckName;
     elements.autosaveStatus.textContent = '저장된 덱을 불러옴';
@@ -195,13 +209,19 @@ function setupDropZone(node, targetSection) {
 }
 
 function findSearchCard(cardId) { return state.searchMap.get(cardId); }
+function listForSection(section) {
+  if (section === 'commander') return state.commanders;
+  if (section === 'sideboard') return state.sideboard;
+  return state.sections[section];
+}
+
 function findDeckEntry(section, key) {
-  const list = section === 'commander' ? state.commanders : state.sections[section];
-  return list?.find(entry => entryKey(entry.card) === key);
+  return listForSection(section)?.find(entry => entryKey(entry.card) === key);
 }
 
 function removeDeckEntry(section, key, all = true) {
-  const list = section === 'commander' ? state.commanders : state.sections[section];
+  const list = listForSection(section);
+  if (!list) return;
   const idx = list.findIndex(entry => entryKey(entry.card) === key);
   if (idx < 0) return;
   if (!all && list[idx].qty > 1) list[idx].qty -= 1;
@@ -215,29 +235,58 @@ function isCommanderCandidate(card) {
   return /Legendary Creature/i.test(type) || /can be your commander/i.test(text) || /Legendary Enchantment.*Background/i.test(type);
 }
 
+function copiesAcrossDeck(card) {
+  const name = cardName(card);
+  return allEntries().filter(entry => cardName(entry.card) === name).reduce((sum, entry) => sum + entry.qty, 0);
+}
+
+function canIncreaseCard(card, amount = 1) {
+  const limit = cardCopyLimit(card, state.format);
+  return !Number.isFinite(limit) || copiesAcrossDeck(card) + amount <= limit;
+}
+
+function copyLimitMessage(card) {
+  const limit = cardCopyLimit(card, state.format);
+  const format = currentFormat();
+  if (!Number.isFinite(limit)) return '';
+  if (limit === 1 && legalityStatus(card, state.format) === 'restricted') return `${format.label} 제한 카드는 메인 덱과 사이드보드를 합쳐 1장만 사용할 수 있습니다.`;
+  return isCommanderMode()
+    ? `${format.label}에서는 ${cardName(card)}을(를) 덱 전체에 ${limit}장까지 사용할 수 있습니다.`
+    : `${format.label}에서는 ${cardName(card)}을(를) 메인 덱과 사이드보드 합계 ${limit}장까지 사용할 수 있습니다.`;
+}
+
 function addCard(card, section = sectionForCard(card), quantity = 1, quiet = false) {
   if (!card) return;
+  const qty = Math.max(1, Number(quantity || 1));
+
   if (section === 'commander') {
+    if (!isCommanderMode()) {
+      if (!quiet) toast('현재 포맷에는 커맨드 존이 없습니다.', 'error');
+      return;
+    }
     if (!isCommanderCandidate(card)) {
-      toast('이 카드는 기본적으로 커맨더로 지정할 수 없습니다.', 'error');
+      if (!quiet) toast('이 카드는 기본적으로 커맨더로 지정할 수 없습니다.', 'error');
       return;
     }
     if (state.commanders.some(entry => cardName(entry.card) === cardName(card))) return;
     if (state.commanders.length >= 2) {
-      toast('커맨더 영역에는 최대 2장까지만 놓을 수 있습니다.', 'error');
+      if (!quiet) toast('커맨더 영역에는 최대 2장까지만 놓을 수 있습니다.', 'error');
       return;
     }
     state.commanders.push({ card, qty: 1 });
   } else {
-    const list = state.sections[section] || state.sections.other;
+    if (section === 'sideboard' && isCommanderMode()) section = sectionForCard(card);
+    const list = listForSection(section) || state.sections.other;
     const key = entryKey(card);
     const existing = list.find(entry => entryKey(entry.card) === key);
-    if (existing) {
-      if (allowsMultiple(card)) existing.qty += quantity;
-      else if (!quiet) toast('커맨더 덱의 같은 이름 카드는 기본적으로 1장만 사용할 수 있습니다.', 'error');
-    } else {
-      list.push({ card, qty: Math.max(1, quantity) });
+
+    if (!quiet && !canIncreaseCard(card, qty)) {
+      toast(copyLimitMessage(card), 'error');
+      return;
     }
+
+    if (existing) existing.qty += qty;
+    else list.push({ card, qty });
   }
   markDirty(); renderDeck();
   if (!quiet) toast(`${cardName(card)} 추가`, 'success');
@@ -245,76 +294,130 @@ function addCard(card, section = sectionForCard(card), quantity = 1, quiet = fal
 
 function handleDrop(payload, targetSection) {
   if (payload.source === 'search') {
-    addCard(findSearchCard(payload.cardId), targetSection === 'commander' ? 'commander' : targetSection);
+    addCard(findSearchCard(payload.cardId), targetSection);
     return;
   }
   if (payload.source !== 'deck' || payload.fromSection === targetSection) return;
 
-  const sourceList = payload.fromSection === 'commander' ? state.commanders : state.sections[payload.fromSection];
+  const sourceList = listForSection(payload.fromSection);
   const sourceIndex = sourceList?.findIndex(entry => entryKey(entry.card) === payload.entryKey) ?? -1;
   if (sourceIndex < 0) return;
   const entry = sourceList[sourceIndex];
   const card = entry.card;
 
   if (targetSection === 'commander') {
+    if (!isCommanderMode()) return toast('현재 포맷에는 커맨드 존이 없습니다.', 'error');
     if (!isCommanderCandidate(card)) return toast('이 카드는 기본적으로 커맨더로 지정할 수 없습니다.', 'error');
+    if (entry.qty !== 1) return toast('커맨더로 옮기려면 카드 수량을 1장으로 맞춰주세요.', 'error');
     if (state.commanders.length >= 2) return toast('커맨더 영역에는 최대 2장까지만 놓을 수 있습니다.', 'error');
     if (state.commanders.some(item => cardName(item.card) === cardName(card))) return;
-  } else {
-    const destination = state.sections[targetSection] || state.sections.other;
-    const existing = destination.find(item => entryKey(item.card) === entryKey(card));
-    if (existing && !allowsMultiple(card)) return toast('대상 구역에 같은 이름의 카드가 이미 있습니다.', 'error');
+  }
+
+  if (targetSection === 'sideboard' && isCommanderMode()) return toast('Commander 포맷에는 사이드보드 영역을 사용하지 않습니다.', 'error');
+  const destination = targetSection === 'commander' ? state.commanders : (listForSection(targetSection) || state.sections.other);
+  const existing = targetSection === 'commander' ? null : destination.find(item => entryKey(item.card) === entryKey(card));
+
+  if (isCommanderMode() && targetSection !== 'commander' && existing && !allowsMultiple(card)) {
+    return toast('Commander 덱의 같은 이름 카드는 기본적으로 1장만 사용할 수 있습니다.', 'error');
   }
 
   sourceList.splice(sourceIndex, 1);
-  if (targetSection === 'commander') {
-    state.commanders.push({ card, qty: 1 });
-  } else {
-    const destination = state.sections[targetSection] || state.sections.other;
-    const existing = destination.find(item => entryKey(item.card) === entryKey(card));
-    if (existing) existing.qty += entry.qty;
-    else destination.push(entry);
-  }
+  if (targetSection === 'commander') destination.push({ card, qty: 1 });
+  else if (existing) existing.qty += entry.qty;
+  else destination.push(entry);
   markDirty();
   renderDeck();
 }
 
+function moveEntriesToMain(entries) {
+  for (const entry of entries) {
+    const section = sectionForCard(entry.card);
+    const list = state.sections[section] || state.sections.other;
+    const existing = list.find(item => entryKey(item.card) === entryKey(entry.card));
+    if (existing) existing.qty += entry.qty;
+    else list.push(entry);
+  }
+}
+
+function changeFormat(nextFormat) {
+  if (!FORMAT_DEFS[nextFormat] || nextFormat === state.format) return;
+  const wasCommander = isCommanderMode();
+  const willCommander = formatConfig(nextFormat).mode === 'commander';
+  if (wasCommander && !willCommander && state.commanders.length) {
+    moveEntriesToMain(state.commanders);
+    state.commanders = [];
+  }
+  if (!wasCommander && willCommander && state.sideboard.length) {
+    moveEntriesToMain(state.sideboard);
+    state.sideboard = [];
+  }
+  state.format = nextFormat;
+  markDirty();
+  renderDeck();
+  searchCards(state.query, 1);
+  toast(`${currentFormat().label} 포맷으로 변경했습니다. 기존 카드는 삭제하지 않고 새 규칙으로 검사합니다.`, 'success');
+}
+
+function renderFormatUi() {
+  const format = currentFormat();
+  elements.deckFormat.value = state.format;
+  elements.formatRuleHint.textContent = format.hint;
+  elements.commanderZone.classList.toggle('hidden', format.mode !== 'commander');
+  elements.sideboardZone.classList.toggle('hidden', format.mode === 'commander');
+  elements.commanderQuickFilter.classList.toggle('hidden', format.mode !== 'commander');
+  elements.popularQuickFilter.textContent = format.mode === 'commander' ? 'EDH 인기' : '포맷 전체';
+  elements.legalOnlyLabel.textContent = `${format.label} 사용 가능`;
+  elements.mainDeckHeading.textContent = format.mode === 'commander' ? '메인 덱 구성' : `${format.label} 메인 덱`;
+  elements.totalTargetLabel.textContent = format.mode === 'commander' ? '/ 100장' : `/ ${format.mainMin}+장`;
+}
+
 function renderDeck() {
+  renderFormatUi();
   elements.deckName.value = state.deckName;
   elements.commanderCards.innerHTML = '';
-  for (const entry of state.commanders) elements.commanderCards.append(createDeckCard(entry, 'commander', true));
+  for (const entry of state.commanders) elements.commanderCards.append(createDeckCard(entry, 'commander', 'commander'));
   elements.commanderPlaceholder.style.display = state.commanders.length >= 2 ? 'none' : '';
   elements.commanderCount.textContent = `${state.commanders.length} / 1–2`;
+
+  elements.sideboardCards.innerHTML = '';
+  for (const entry of state.sideboard) elements.sideboardCards.append(createDeckCard(entry, 'sideboard', 'sideboard'));
+  elements.sideboardPlaceholder.style.display = state.sideboard.length ? 'none' : '';
+  elements.sideboardCount.textContent = `${totalEntryQty(state.sideboard)} / ${currentFormat().sideboardMax || 0}`;
 
   for (const [id] of SECTION_DEFS) {
     const sectionNode = elements.deckSections.querySelector(`[data-section="${id}"]`);
     const body = sectionNode.querySelector('.section-body');
     body.innerHTML = '';
-    for (const entry of state.sections[id]) body.append(createDeckCard(entry, id, false));
+    for (const entry of state.sections[id]) body.append(createDeckCard(entry, id, 'main'));
     sectionNode.querySelector('.section-count').textContent = `${totalEntryQty(state.sections[id])}장`;
   }
   updateAnalyticsAndValidation();
 }
 
-function createDeckCard(entry, section, commander = false) {
+function createDeckCard(entry, section, variant = 'main') {
   const card = entry.card;
+  const commander = variant === 'commander';
+  const sideboard = variant === 'sideboard';
   const node = document.createElement('article');
-  node.className = commander ? 'commander-card' : 'deck-card';
+  node.className = commander ? 'commander-card' : sideboard ? 'sideboard-card' : 'deck-card';
   node.draggable = true;
   node.title = `${cardName(card)}\n${card.type_line || ''}`;
+  const showQtyControls = !commander && (isCommanderMode() ? allowsMultiple(card) : true);
   node.innerHTML = `
     <img src="${escapeHtml(cardImage(card, commander ? 'normal' : 'small'))}" alt="${escapeHtml(cardName(card))}" loading="lazy">
     <button class="remove-card" title="제거" aria-label="제거">×</button>
     ${!commander && entry.qty > 1 ? `<span class="qty-pill">×${entry.qty}</span>` : ''}
-    ${!commander && allowsMultiple(card) ? `<span class="qty-controls"><button data-qty="minus">−</button><button data-qty="plus">+</button></span>` : ''}
+    ${showQtyControls ? `<span class="qty-controls"><button data-qty="minus">−</button><button data-qty="plus">+</button></span>` : ''}
   `;
   node.addEventListener('dragstart', event => setDragData(event, { source: 'deck', cardId: card.id, fromSection: section, entryKey: entryKey(card) }));
   node.addEventListener('dblclick', () => showCardDialog(card));
   node.querySelector('.remove-card').addEventListener('click', event => { event.stopPropagation(); removeDeckEntry(section, entryKey(card)); });
   node.querySelectorAll('[data-qty]').forEach(button => button.addEventListener('click', event => {
     event.stopPropagation();
-    if (button.dataset.qty === 'plus') entry.qty += 1;
-    else if (entry.qty > 1) entry.qty -= 1;
+    if (button.dataset.qty === 'plus') {
+      if (!canIncreaseCard(card, 1)) return toast(copyLimitMessage(card), 'error');
+      entry.qty += 1;
+    } else if (entry.qty > 1) entry.qty -= 1;
     else return removeDeckEntry(section, entryKey(card));
     markDirty(); renderDeck();
   }));
@@ -342,64 +445,104 @@ function commanderPairCompatible(a, b) {
 
 function validateDeck() {
   const errors = [], warnings = [];
-  const total = allCardsExpanded().length;
-  const identity = commanderIdentity();
+  const format = currentFormat();
+  const mainCount = totalEntryQty(allMainEntries());
+  const sideboardCount = totalEntryQty(state.sideboard);
+  const total = isCommanderMode() ? mainCount + state.commanders.length : mainCount + sideboardCount;
 
-  if (state.commanders.length === 0) errors.push('커맨더를 1장 이상 지정하세요.');
-  if (state.commanders.length > 2) errors.push('커맨더는 최대 2장입니다.');
-  if (state.commanders.length === 2 && !commanderPairCompatible(state.commanders[0].card, state.commanders[1].card)) {
-    warnings.push('두 커맨더의 Partner·Background 등 동시 사용 조건을 직접 확인하세요.');
-  }
-  if (total !== 100) errors.push(`현재 ${total}장입니다. 커맨더를 포함해 정확히 100장이 필요합니다.`);
-
-  const byName = new Map();
-  for (const entry of allEntries()) byName.set(cardName(entry.card), (byName.get(cardName(entry.card)) || 0) + entry.qty);
-  for (const [name, qty] of byName) {
-    const card = allEntries().find(entry => cardName(entry.card) === name)?.card;
-    if (qty > 1 && card && !allowsMultiple(card)) errors.push(`중복 카드: ${name} ×${qty}`);
-  }
-
-  for (const entry of allEntries()) {
-    const card = entry.card;
-    if (card.legalities?.commander && card.legalities.commander !== 'legal') errors.push(`${cardName(card)}: 커맨더 포맷에서 ${card.legalities.commander}`);
-    if (state.commanders.length && !subsetOf(card.color_identity, identity)) {
-      errors.push(`${cardName(card)}의 색 정체성이 커맨더 범위를 벗어납니다.`);
+  if (isCommanderMode()) {
+    const identity = commanderIdentity();
+    if (state.commanders.length === 0) errors.push('커맨더를 1장 이상 지정하세요.');
+    if (state.commanders.length > 2) errors.push('커맨더는 최대 2장입니다.');
+    if (state.commanders.length === 2 && !commanderPairCompatible(state.commanders[0].card, state.commanders[1].card)) {
+      warnings.push('두 커맨더의 Partner·Background 등 동시 사용 조건을 직접 확인하세요.');
     }
+    if (total !== format.exactTotal) errors.push(`현재 ${total}장입니다. 커맨더를 포함해 정확히 ${format.exactTotal}장이 필요합니다.`);
+
+    const byName = groupedNameCounts([state.commanders, allMainEntries()]);
+    for (const [name, item] of byName) {
+      const limit = cardCopyLimit(item.card, state.format);
+      if (Number.isFinite(limit) && item.qty > limit) errors.push(`중복 카드: ${name} ×${item.qty} · 허용 ${limit}장`);
+    }
+
+    for (const entry of allEntries()) {
+      const card = entry.card;
+      const legality = legalityStatus(card, state.format);
+      if (!isFormatPlayableStatus(legality)) errors.push(`${cardName(card)}: Commander에서 ${legality}`);
+      if (state.commanders.length && !subsetOf(card.color_identity, identity)) errors.push(`${cardName(card)}의 색 정체성이 커맨더 범위를 벗어납니다.`);
+    }
+    if (state.commanders.length && identity.size === 0) warnings.push('무색 커맨더 덱으로 검사 중입니다.');
+  } else {
+    if (mainCount < format.mainMin) errors.push(`메인 덱이 ${mainCount}장입니다. ${format.label}는 최소 ${format.mainMin}장이 필요합니다.`);
+    if (sideboardCount > format.sideboardMax) errors.push(`사이드보드가 ${sideboardCount}장입니다. 최대 ${format.sideboardMax}장까지 사용할 수 있습니다.`);
+
+    const byName = groupedNameCounts([allMainEntries(), state.sideboard]);
+    for (const [name, item] of byName) {
+      const limit = cardCopyLimit(item.card, state.format);
+      if (Number.isFinite(limit) && item.qty > limit) {
+        const restricted = legalityStatus(item.card, state.format) === 'restricted';
+        errors.push(`${name} ×${item.qty}: ${restricted ? '제한 카드라 합계 1장만' : `메인 덱과 사이드보드 합계 ${limit}장까지`} 사용할 수 있습니다.`);
+      }
+    }
+
+    for (const entry of allEntries()) {
+      const card = entry.card;
+      const legality = legalityStatus(card, state.format);
+      if (!isFormatPlayableStatus(legality)) errors.push(`${cardName(card)}: ${format.label}에서 ${legality}`);
+      else if (legality === 'restricted') warnings.push(`${cardName(card)}은(는) ${format.label} 제한 카드이며 합계 1장만 허용됩니다.`);
+    }
+    if (['historic', 'timeless', 'alchemy'].includes(state.format)) warnings.push('Arena 디지털 포맷은 BO3 사이드보드 최대 15장 기준으로 검사합니다. BO1 이벤트는 더 작은 제한이 적용될 수 있습니다.');
   }
 
-  if (state.commanders.length && identity.size === 0) warnings.push('무색 커맨더 덱으로 검사 중입니다.');
-  return { errors: [...new Set(errors)], warnings: [...new Set(warnings)] };
+  return {
+    errors: [...new Set(errors)], warnings: [...new Set(warnings)],
+    mainCount, sideboardCount, total
+  };
 }
 
 function updateAnalyticsAndValidation() {
-  const cards = allCardsExpanded();
   const mainCards = allMainEntries().flatMap(entry => Array.from({ length: entry.qty }, () => entry.card));
-  const total = cards.length;
+  const format = currentFormat();
+  const mainCount = mainCards.length;
+  const sideboardCount = sideboardCardsExpanded().length;
+  const commanderTotal = mainCount + state.commanders.length;
+  const displayTotal = isCommanderMode() ? commanderTotal : mainCount;
   const nonlands = mainCards.filter(card => !/Land/i.test(card.type_line || ''));
   const avg = nonlands.length ? nonlands.reduce((sum, card) => sum + Number(card.cmc || 0), 0) / nonlands.length : 0;
   const lands = mainCards.filter(card => /Land/i.test(card.type_line || '')).length;
   const identity = [...commanderIdentity()];
 
-  elements.totalCount.textContent = total;
+  elements.totalCount.textContent = displayTotal;
   elements.avgMana.textContent = avg.toFixed(2);
   elements.landCount.textContent = lands;
-  elements.deckIdentity.textContent = `색 정체성: ${identity.length ? identity.map(c => COLOR_NAMES[c]).join('·') : (state.commanders.length ? '무색' : '미지정')}`;
+  elements.deckIdentity.textContent = isCommanderMode()
+    ? `색 정체성: ${identity.length ? identity.map(c => COLOR_NAMES[c]).join('·') : (state.commanders.length ? '무색' : '미지정')}`
+    : `${format.label} · 사이드보드 ${sideboardCount}/${format.sideboardMax}`;
 
   const validation = validateDeck();
-  const isValid = validation.errors.length === 0 && total === 100 && state.commanders.length >= 1;
+  const isValid = validation.errors.length === 0;
   elements.validityBadge.className = `status-badge ${isValid ? 'good' : (validation.errors.length ? 'bad' : 'neutral')}`;
   elements.validityBadge.textContent = isValid ? '규칙 통과' : validation.errors.length ? '수정 필요' : '작성 중';
-  elements.validationSummary.innerHTML = `
-    <div><strong>${total}</strong><span>전체 카드</span></div>
-    <div><strong>${state.commanders.length}</strong><span>커맨더</span></div>
-    <div><strong>${100 - total}</strong><span>남은 장수</span></div>`;
+
+  if (isCommanderMode()) {
+    elements.validationSummary.innerHTML = `
+      <div><strong>${commanderTotal}</strong><span>전체 카드</span></div>
+      <div><strong>${state.commanders.length}</strong><span>커맨더</span></div>
+      <div><strong>${format.exactTotal - commanderTotal}</strong><span>남은 장수</span></div>`;
+  } else {
+    elements.validationSummary.innerHTML = `
+      <div><strong>${mainCount}</strong><span>메인 덱</span></div>
+      <div><strong>${sideboardCount}</strong><span>사이드보드</span></div>
+      <div><strong>${Math.max(0, format.mainMin - mainCount)}</strong><span>메인 부족</span></div>`;
+  }
+
   const issues = [
-    ...(isValid ? [{ type: 'ok', text: '기본 커맨더 덱 구성 검사를 통과했습니다.' }] : []),
+    ...(isValid ? [{ type: 'ok', text: `${format.label} 기본 덱 구성 검사를 통과했습니다.` }] : []),
     ...validation.errors.map(text => ({ type: 'error', text })),
     ...validation.warnings.map(text => ({ type: 'warning', text }))
   ];
-  if (!issues.length) issues.push({ type: 'warning', text: '카드를 추가하면 색 정체성·중복·장수·합법성을 검사합니다.' });
-  elements.validationIssues.innerHTML = issues.slice(0, 12).map(issue => `<li class="${issue.type}">${escapeHtml(issue.text)}</li>`).join('');
+  if (!issues.length) issues.push({ type: 'warning', text: '카드를 추가하면 장수·복사 제한·포맷 합법성을 검사합니다.' });
+  elements.validationIssues.innerHTML = issues.slice(0, 16).map(issue => `<li class="${issue.type}">${escapeHtml(issue.text)}</li>`).join('');
 
   renderManaCurve(mainCards);
   renderTypeBreakdown();
@@ -699,7 +842,7 @@ function tokenPredicate(rawToken) {
   else if (['set', 's'].includes(key)) predicate = card => card._set.includes(value);
   else if (['r', 'rarity'].includes(key)) predicate = card => normalizeText(card.rarity) === value;
   else if (['lang', 'language'].includes(key)) predicate = card => normalizeText(card.lang) === value;
-  else if (['legal', 'f'].includes(key)) predicate = card => normalizeText(card.legalities?.[value]) === 'legal';
+  else if (['legal', 'f'].includes(key)) predicate = card => ['legal', 'restricted'].includes(normalizeText(card.legalities?.[value]));
   else if (['c', 'color'].includes(key)) predicate = card => colorMatches(card, rawValue, false);
   else if (['id', 'identity'].includes(key)) predicate = card => colorMatches(card, rawValue, true);
   else if (['mv', 'cmc'].includes(key)) predicate = card => compareNumber(Number(card.cmc || 0), rawValue);
@@ -761,7 +904,7 @@ async function fetchSearchData(q, page, raw) {
     } catch (error) { if (state.searchSource === 'local') throw error; }
   }
   try {
-    const params = new URLSearchParams({ q, page: String(page), unique: 'cards', order: 'edhrec' });
+    const params = new URLSearchParams({ q, page: String(page), unique: 'cards', order: isCommanderMode() ? 'edhrec' : 'name' });
     const data = await queuedScryfallJson(`/cards/search?${params}`);
     state.lastSearchSource = 'online';
     return data;
@@ -777,10 +920,11 @@ async function fetchSearchData(q, page, raw) {
 function buildSearchQuery(raw) {
   const parts = [];
   if (raw.trim()) parts.push(`(${raw.trim()})`);
-  if (elements.legalOnly.checked && !/legal:/i.test(raw)) parts.push('legal:commander');
+  if (elements.legalOnly.checked && !/legal:/i.test(raw)) parts.push(`legal:${currentFormat().legality}`);
   const lang = elements.languageFilter.value;
   if (lang && !/lang:/i.test(raw)) parts.push(`lang:${lang}`);
-  return parts.join(' ') || 't:legendary t:creature legal:commander';
+  if (parts.length) return parts.join(' ');
+  return isCommanderMode() ? 't:legendary t:creature legal:commander' : `legal:${currentFormat().legality}`;
 }
 
 async function searchCards(raw = state.query, page = 1) {
@@ -852,16 +996,18 @@ function showCardDialog(card) {
           <div><span>아티스트</span><strong>${escapeHtml(card.artist || '-')}</strong></div>
           <div><span>시장가 참고</span><strong>${escapeHtml(price)}</strong></div>
           <div><span>EDHREC 순위</span><strong>${card.edhrec_rank ? card.edhrec_rank.toLocaleString('ko-KR') : '-'}</strong></div>
-          <div><span>커맨더 합법성</span><strong>${escapeHtml(card.legalities?.commander || 'unknown')}</strong></div>
+          <div><span>${escapeHtml(currentFormat().label)} 합법성</span><strong>${escapeHtml(legalityStatus(card, state.format))}</strong></div>
         </div>
         <div class="detail-actions">
           <button class="btn primary" id="detailAddBtn">메인 덱에 추가</button>
-          ${isCommanderCandidate(card) ? '<button class="btn ghost" id="detailCommanderBtn">커맨더로 지정</button>' : ''}
+          ${!isCommanderMode() ? '<button class="btn ghost" id="detailSideboardBtn">사이드보드에 추가</button>' : ''}
+          ${isCommanderMode() && isCommanderCandidate(card) ? '<button class="btn ghost" id="detailCommanderBtn">커맨더로 지정</button>' : ''}
           <a class="btn ghost" href="${escapeHtml(card.scryfall_uri || '#')}" target="_blank" rel="noreferrer">Scryfall에서 보기</a>
         </div>
       </div>
     </div>`;
   el('detailAddBtn').addEventListener('click', () => { addCard(card); elements.cardDialog.close(); });
+  el('detailSideboardBtn')?.addEventListener('click', () => { addCard(card, 'sideboard'); elements.cardDialog.close(); });
   el('detailCommanderBtn')?.addEventListener('click', () => { addCard(card, 'commander'); elements.cardDialog.close(); });
   elements.cardDialog.showModal();
 }
@@ -912,45 +1058,61 @@ function exportLine(entry, { printing = false, commanderTag = false } = {}) {
 
 function exportDeckText(format = state.exportFormat) {
   const mainEntries = SECTION_DEFS.flatMap(([id]) => state.sections[id]);
+  const sideboardEntries = state.sideboard;
 
   if (format === 'arena') {
     const lines = [];
-    if (state.commanders.length) {
+    if (isCommanderMode() && state.commanders.length) {
       lines.push('Commander');
       state.commanders.forEach(entry => lines.push(exportLine(entry, { printing: true })));
       lines.push('');
     }
     lines.push('Deck');
     mainEntries.forEach(entry => lines.push(exportLine(entry, { printing: true })));
+    if (!isCommanderMode() && sideboardEntries.length) {
+      lines.push('', 'Sideboard');
+      sideboardEntries.forEach(entry => lines.push(exportLine(entry, { printing: true })));
+    }
     return lines.join('\n').trim();
   }
 
   if (format === 'moxfield') {
-    return [
+    const lines = [
       ...state.commanders.map(entry => exportLine(entry, { printing: true, commanderTag: true })),
       ...mainEntries.map(entry => exportLine(entry, { printing: true }))
-    ].join('\n').trim();
+    ];
+    if (!isCommanderMode() && sideboardEntries.length) {
+      lines.push('', 'SIDEBOARD:');
+      sideboardEntries.forEach(entry => lines.push(exportLine(entry, { printing: true })));
+    }
+    return lines.join('\n').trim();
   }
 
-  const lines = [`// ${state.deckName}`, ''];
-  if (state.commanders.length) {
+  const lines = [`// ${state.deckName}`, `// Format: ${currentFormat().label}`, ''];
+  if (isCommanderMode() && state.commanders.length) {
     lines.push('Commander');
     state.commanders.forEach(entry => lines.push(exportLine(entry)));
     lines.push('');
   }
+  lines.push('Main Deck');
   for (const [id, name] of SECTION_DEFS) {
     if (!state.sections[id].length) continue;
     lines.push(name);
     state.sections[id].forEach(entry => lines.push(exportLine(entry)));
     lines.push('');
   }
+  if (!isCommanderMode() && sideboardEntries.length) {
+    lines.push('Sideboard');
+    sideboardEntries.forEach(entry => lines.push(exportLine(entry)));
+  }
   return lines.join('\n').trim();
 }
 
 function exportFormatHelp(format) {
-  if (format === 'arena') return 'MTG Arena의 Commander/Deck 구역 형식입니다. Arena에 없는 카드나 세트는 가져오지 못할 수 있습니다.';
-  if (format === 'moxfield') return 'Moxfield용 인쇄본 형식입니다. 세트 코드와 수집 번호를 포함하며 커맨더에는 *CMDR* 표식을 붙입니다.';
-  return '카드 유형별 구역을 포함한 읽기 쉬운 일반 텍스트 형식입니다.';
+  const zones = isCommanderMode() ? 'Commander/Deck' : 'Deck/Sideboard';
+  if (format === 'arena') return `MTG Arena의 ${zones} 구역 형식입니다. Arena에 없는 카드나 세트는 가져오지 못할 수 있습니다.`;
+  if (format === 'moxfield') return `Moxfield용 인쇄본 형식입니다. ${isCommanderMode() ? '커맨더에는 *CMDR* 표식을 붙입니다.' : '사이드보드는 SIDEBOARD 구역으로 분리합니다.'}`;
+  return '포맷, 메인 덱, 커맨더 또는 사이드보드 구역을 포함한 읽기 쉬운 일반 텍스트 형식입니다.';
 }
 
 function refreshExportText() {
@@ -960,10 +1122,10 @@ function refreshExportText() {
 }
 
 function safeDeckFilename() {
-  const base = (state.deckName || 'commander-deck')
+  const base = (state.deckName || `${currentFormat().label}-deck`)
     .replace(/[\/:*?"<>|]+/g, '-')
     .replace(/\s+/g, ' ')
-    .trim() || 'commander-deck';
+    .trim() || 'mtg-deck';
   return `${base}-${state.exportFormat}.txt`;
 }
 
@@ -990,7 +1152,7 @@ function openTextDialog(mode) {
   elements.textDialogConfirm.textContent = state.importMode ? '가져오기' : '클립보드에 복사';
 
   if (state.importMode) {
-    elements.textDialogHelp.textContent = 'Arena의 Commander/Deck 헤더와 Moxfield의 *CMDR* 표식을 인식합니다. 한 줄에 “1 Sol Ring” 형식으로 입력할 수도 있습니다. 최대 75개의 서로 다른 카드 이름을 한 번에 확인합니다.';
+    elements.textDialogHelp.textContent = 'Arena/Moxfield의 Commander, Deck, Sideboard 헤더와 *CMDR* 표식을 인식합니다. 커맨더 표식이 없고 현재 포맷이 Commander라면 Standard로 전환하므로, 가져온 뒤 원하는 포맷을 선택하세요.';
     elements.deckTextArea.value = '';
   } else {
     elements.exportFormat.value = state.exportFormat;
@@ -1000,59 +1162,90 @@ function openTextDialog(mode) {
 }
 
 function parseDeckList(text) {
-  const parsed = [];
+  const items = [];
   let section = 'main';
+  let hasCommander = false;
+  let hasSideboard = false;
+  let formatHint = null;
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
-    if (!line || line.startsWith('//') || line.startsWith('#')) continue;
-    if (/^commander(s)?$/i.test(line)) { section = 'commander'; continue; }
-    if (/^(deck|mainboard|creatures?|instants?|sorceries?|artifacts?|enchantments?|planeswalkers?|lands?|other|생물|순간마법|집중마법|마법물체|부여마법|플레인즈워커|대지|기타)$/i.test(line)) { section = 'main'; continue; }
+    if (!line) continue;
+    const formatComment = line.match(/^\/\/\s*Format:\s*(.+)$/i);
+    if (formatComment) {
+      const wanted = formatComment[1].trim().toLowerCase();
+      formatHint = Object.keys(FORMAT_DEFS).find(key => key === wanted || FORMAT_DEFS[key].label.toLowerCase() === wanted || FORMAT_DEFS[key].labelKo === formatComment[1].trim()) || null;
+      continue;
+    }
+    if (line.startsWith('//') || line.startsWith('#')) continue;
+    if (/^\[?commanders?\]?:?$/i.test(line)) { section = 'commander'; hasCommander = true; continue; }
+    if (/^\[?(sideboard|side board|maybeboard)\]?:?$/i.test(line)) { section = 'sideboard'; hasSideboard = true; continue; }
+    if (/^\[?(deck|mainboard|main deck|creatures?|instants?|sorceries?|artifacts?|enchantments?|planeswalkers?|battles?|lands?|other|생물|순간마법|집중마법|마법물체|부여마법|플레인즈워커|전투|대지|기타)\]?:?$/i.test(line)) { section = 'main'; continue; }
+    if (/^companion:?$/i.test(line)) { section = 'sideboard'; hasSideboard = true; continue; }
     const commanderTagged = /\s+\*CMDR\*\s*$/i.test(line);
-    const cleanLine = line.replace(/\s+\*(?:CMDR|F)\*\s*$/gi, '').trim();
+    const sideboardTagged = /\s+\*(?:CMPN|SB)\*\s*$/i.test(line);
+    const cleanLine = line.replace(/\s+\*(?:CMDR|F|CMPN|SB)\*\s*$/gi, '').trim();
     const match = cleanLine.match(/^(\d+)\s*[xX]?\s+(.+?)(?:\s+\([A-Z0-9]+\)\s+[A-Z0-9★-]+)?$/i);
     const qty = match ? Number(match[1]) : 1;
     const name = (match ? match[2] : cleanLine).trim();
-    if (name) parsed.push({ qty, name, section: commanderTagged ? 'commander' : section });
+    const target = commanderTagged ? 'commander' : sideboardTagged ? 'sideboard' : section;
+    if (target === 'commander') hasCommander = true;
+    if (target === 'sideboard') hasSideboard = true;
+    if (name) items.push({ qty, name, section: target });
   }
-  return parsed;
+  return { items, hasCommander, hasSideboard, formatHint };
+}
+
+async function fetchCollectionBatches(identifiers) {
+  const collected = [];
+  const notFound = [];
+  for (let index = 0; index < identifiers.length; index += 75) {
+    const batch = identifiers.slice(index, index + 75);
+    const result = await queuedScryfallJson('/cards/collection', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifiers: batch })
+    });
+    collected.push(...(result.data || []));
+    notFound.push(...(result.not_found || []));
+  }
+  return { object: 'list', data: collected, not_found: notFound };
 }
 
 async function importDeck(text) {
   const parsed = parseDeckList(text);
-  if (!parsed.length) throw new Error('가져올 카드 목록이 없습니다.');
-  const unique = [...new Map(parsed.map(item => [item.name.toLowerCase(), item])).values()];
-  if (unique.length > 75) throw new Error('한 번에 가져올 수 있는 서로 다른 카드 이름은 75개까지입니다.');
+  if (!parsed.items.length) throw new Error('가져올 카드 목록이 없습니다.');
+  const unique = [...new Map(parsed.items.map(item => [item.name.toLowerCase(), item])).values()];
+  if (unique.length > 250) throw new Error('한 번에 가져올 수 있는 서로 다른 카드 이름은 250개까지입니다.');
   const identifiers = unique.map(item => ({ name: item.name }));
   let data;
   if (state.localDb.ready && state.searchSource !== 'online') {
     data = localCollection(identifiers);
     if (state.searchSource === 'auto' && data.not_found.length) {
       try {
-        const online = await queuedScryfallJson('/cards/collection', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifiers: data.not_found })
-        });
+        const online = await fetchCollectionBatches(data.not_found);
         data = { object: 'list', data: [...data.data, ...(online.data || [])], not_found: online.not_found || [] };
       } catch { /* keep local results */ }
     }
   }
-  if (!data) data = await queuedScryfallJson('/cards/collection', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifiers })
-  });
+  if (!data) data = await fetchCollectionBatches(identifiers);
+
   const cardsByName = new Map((data.data || []).map(card => [cardName(card).toLowerCase(), card]));
   const notFound = data.not_found || [];
-  const oldCommanders = state.commanders;
-  const oldSections = state.sections;
+  const old = { format: state.format, commanders: state.commanders, sideboard: state.sideboard, sections: state.sections };
+  state.format = parsed.hasCommander ? 'commander' : (parsed.formatHint && FORMAT_DEFS[parsed.formatHint] ? parsed.formatHint : (isCommanderMode() ? 'standard' : state.format));
   state.commanders = [];
+  state.sideboard = [];
   state.sections = Object.fromEntries(SECTION_DEFS.map(([id]) => [id, []]));
   try {
-    for (const item of parsed) {
-      const card = cardsByName.get(item.name.toLowerCase()) || [...cardsByName.values()].find(card => cardName(card).toLowerCase().startsWith(item.name.toLowerCase()));
+    for (const item of parsed.items) {
+      const card = cardsByName.get(item.name.toLowerCase()) || [...cardsByName.values()].find(candidate => cardName(candidate).toLowerCase().startsWith(item.name.toLowerCase()));
       if (!card) continue;
-      addCard(card, item.section === 'commander' ? 'commander' : sectionForCard(card), item.qty, true);
+      const target = item.section === 'commander' ? 'commander' : item.section === 'sideboard' ? 'sideboard' : sectionForCard(card);
+      addCard(card, target, item.qty, true);
     }
   } catch (error) {
-    state.commanders = oldCommanders;
-    state.sections = oldSections;
+    state.format = old.format;
+    state.commanders = old.commanders;
+    state.sideboard = old.sideboard;
+    state.sections = old.sections;
     throw error;
   }
   renderDeck();
@@ -1060,8 +1253,10 @@ async function importDeck(text) {
 }
 
 function resetDeck() {
-  state.deckName = '새 커맨더 덱';
+  const format = currentFormat();
+  state.deckName = `새 ${format.labelKo || format.label} 덱`;
   state.commanders = [];
+  state.sideboard = [];
   state.sections = Object.fromEntries(SECTION_DEFS.map(([id]) => [id, []]));
   markDirty(); renderDeck();
 }
@@ -1070,7 +1265,8 @@ function autoSortDeck() {
   for (const [id] of SECTION_DEFS) {
     state.sections[id].sort((a, b) => Number(a.card.cmc || 0) - Number(b.card.cmc || 0) || cardName(a.card).localeCompare(cardName(b.card)));
   }
-  markDirty(); renderDeck(); toast('마나 값과 이름 순으로 정렬했습니다.', 'success');
+  state.sideboard.sort((a, b) => cardName(a.card).localeCompare(cardName(b.card)));
+  markDirty(); renderDeck(); toast('메인 덱은 마나 값·이름, 사이드보드는 이름 순으로 정렬했습니다.', 'success');
 }
 
 function bindEvents() {
@@ -1099,9 +1295,10 @@ function bindEvents() {
   }));
 
   elements.deckName.addEventListener('input', () => { state.deckName = elements.deckName.value; markDirty(); });
+  elements.deckFormat.addEventListener('change', () => changeFormat(elements.deckFormat.value));
   el('saveBtn').addEventListener('click', () => persistDeck(true));
   el('newDeckBtn').addEventListener('click', () => { if (confirm('현재 덱을 비우고 새 덱을 만들까요?')) resetDeck(); });
-  el('clearDeckBtn').addEventListener('click', () => { if (confirm('커맨더를 포함한 모든 카드를 제거할까요?')) resetDeck(); });
+  el('clearDeckBtn').addEventListener('click', () => { if (confirm('메인 덱, 커맨더 또는 사이드보드의 모든 카드를 제거할까요?')) resetDeck(); });
   el('sortDeckBtn').addEventListener('click', autoSortDeck);
   el('importBtn').addEventListener('click', () => openTextDialog('import'));
   el('exportBtn').addEventListener('click', () => openTextDialog('export'));
@@ -1138,7 +1335,8 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-close-dialog]').forEach(button => button.addEventListener('click', () => elements.cardDialog.close()));
   elements.cardDialog.addEventListener('click', event => { if (event.target === elements.cardDialog) elements.cardDialog.close(); });
-  setupDropZone(document.querySelector('.commander-zone'), 'commander');
+  setupDropZone(elements.commanderZone, 'commander');
+  setupDropZone(elements.sideboardZone, 'sideboard');
   setupDropZone(elements.trashZone, 'trash');
   el('collapseSearchBtn').addEventListener('click', () => {
     document.querySelector('.search-panel').classList.toggle('collapsed');
@@ -1156,7 +1354,8 @@ async function init() {
   renderDeck();
   await refreshLocalDbStatus();
   maybeAutoUpdateLocalDb();
-  await Promise.all([loadSymbols(), searchCards('t:legendary t:creature', 1)]);
+  const initialQuery = isCommanderMode() ? 't:legendary t:creature' : '';
+  await Promise.all([loadSymbols(), searchCards(initialQuery, 1)]);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
 }
 

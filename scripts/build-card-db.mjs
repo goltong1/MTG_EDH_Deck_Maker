@@ -9,7 +9,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outputDir = path.join(root, 'public', 'data');
 const cacheDir = path.resolve(process.env.SCRYFALL_CACHE_DIR || path.join(root, '.cache', 'scryfall'));
 const bulkInfoUrl = process.env.SCRYFALL_BULK_INFO_URL || 'https://api.scryfall.com/bulk-data/oracle-cards';
-const userAgent = process.env.SCRYFALL_USER_AGENT || 'CommanderCanvasGithubPages/1.0 (GitHub Pages deck builder)';
+const userAgent = process.env.SCRYFALL_USER_AGENT || 'DeckCanvasGithubPages/2.0 (GitHub Pages deck builder)';
 const minCards = Number(process.env.SCRYFALL_MIN_CARDS || 1000);
 
 const outputCards = path.join(outputDir, 'cards.json.gz');
@@ -150,7 +150,7 @@ console.log(`Compressing ${(Buffer.byteLength(json) / 1024 / 1024).toFixed(1)} M
 const compressed = await gzipAsync(Buffer.from(json), { level: 9 });
 const now = new Date().toISOString();
 const meta = {
-  object: 'commander_canvas_card_database',
+  object: 'deck_canvas_card_database',
   ready: true,
   version: info.updated_at || now,
   sourceType: info.type || 'oracle_cards',

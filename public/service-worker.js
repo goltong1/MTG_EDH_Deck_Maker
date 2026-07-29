@@ -1,7 +1,7 @@
-const SHELL_CACHE = 'commander-canvas-shell-pages-v1';
-const IMAGE_CACHE = 'commander-canvas-card-images-v2';
-const DATA_CACHE = 'commander-canvas-published-db-v1';
-const SHELL_FILES = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest'];
+const SHELL_CACHE = 'deck-canvas-shell-pages-v2';
+const IMAGE_CACHE = 'deck-canvas-card-images-v3';
+const DATA_CACHE = 'deck-canvas-published-db-v2';
+const SHELL_FILES = ['./', './index.html', './styles.css', './app.js', './deck-rules.js', './manifest.webmanifest'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.addAll(SHELL_FILES)));
@@ -11,7 +11,7 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys => Promise.all(keys
-      .filter(key => key.startsWith('commander-canvas-') && ![SHELL_CACHE, IMAGE_CACHE, DATA_CACHE].includes(key))
+      .filter(key => (key.startsWith('commander-canvas-') || key.startsWith('deck-canvas-')) && ![SHELL_CACHE, IMAGE_CACHE, DATA_CACHE].includes(key))
       .map(key => caches.delete(key))))
   );
   self.clients.claim();

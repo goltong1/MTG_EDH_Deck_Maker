@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Scryfall API 기반 드래그 앤 드롭 커맨더 덱 빌더" />
-  <title>Commander Canvas</title>
+  <meta name="description" content="Scryfall 기반 드래그 앤 드롭 MTG 덱 빌더" />
+  <title>Deck Canvas</title>
   <link rel="manifest" href="./manifest.webmanifest" />
   <meta name="theme-color" content="#10131a" />
   <link rel="preconnect" href="https://cards.scryfall.io" crossorigin />
@@ -13,10 +13,10 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">CC</div>
+      <div class="brand-mark" aria-hidden="true">DC</div>
       <div>
-        <h1>Commander Canvas</h1>
-        <p>Scryfall 기반 드래그 앤 드롭 덱 빌더</p>
+        <h1>Deck Canvas</h1>
+        <p>Commander와 주요 60장 컨스트럭티드 포맷 지원</p>
       </div>
     </div>
     <div class="top-actions">
@@ -46,7 +46,7 @@
         <div id="suggestions" class="suggestions hidden"></div>
 
         <div class="filter-row">
-          <label class="check"><input id="legalOnly" type="checkbox" checked /> 커맨더 사용 가능</label>
+          <label class="check"><input id="legalOnly" type="checkbox" checked /> <span id="legalOnlyLabel">선택 포맷 사용 가능</span></label>
           <select id="searchSource" aria-label="검색 데이터 소스">
             <option value="auto">자동 · 브라우저 DB 우선</option>
             <option value="local">브라우저 DB만</option>
@@ -60,12 +60,12 @@
           </select>
         </div>
         <div class="quick-filters" id="quickFilters">
-          <button type="button" data-query="t:legendary t:creature">커맨더</button>
+          <button type="button" id="commanderQuickFilter" data-query="t:legendary t:creature">커맨더</button>
           <button type="button" data-query="t:creature">생물</button>
           <button type="button" data-query="t:instant">순간마법</button>
           <button type="button" data-query="t:sorcery">집중마법</button>
           <button type="button" data-query="t:land">대지</button>
-          <button type="button" data-query="order:edhrec">EDH 인기</button>
+          <button type="button" id="popularQuickFilter" data-query="order:edhrec">EDH 인기</button>
         </div>
       </form>
 
@@ -106,14 +106,31 @@
             <span id="deckIdentity">색 정체성: 미지정</span>
           </div>
         </div>
+        <div class="format-picker">
+          <label for="deckFormat">포맷</label>
+          <select id="deckFormat" aria-label="덱 포맷">
+            <option value="commander">Commander</option>
+            <option value="standard">Standard</option>
+            <option value="pioneer">Pioneer</option>
+            <option value="modern">Modern</option>
+            <option value="legacy">Legacy</option>
+            <option value="vintage">Vintage</option>
+            <option value="pauper">Pauper</option>
+            <option value="explorer">Explorer</option>
+            <option value="historic">Historic</option>
+            <option value="timeless">Timeless</option>
+            <option value="alchemy">Alchemy</option>
+          </select>
+          <span id="formatRuleHint">커맨더 포함 정확히 100장</span>
+        </div>
         <div class="deck-stats-inline">
-          <div><strong id="totalCount">0</strong><span>/ 100장</span></div>
+          <div><strong id="totalCount">0</strong><span id="totalTargetLabel">/ 100장</span></div>
           <div><strong id="avgMana">0.00</strong><span>평균 MV</span></div>
           <div><strong id="landCount">0</strong><span>대지</span></div>
         </div>
       </div>
 
-      <div class="commander-zone panel drop-zone" data-section="commander">
+      <div id="commanderZone" class="commander-zone panel drop-zone" data-section="commander">
         <div class="zone-label">
           <span class="crown">♛</span>
           <div><span class="eyebrow">COMMAND ZONE</span><h2>커맨더</h2></div>
@@ -126,12 +143,25 @@
         </div>
       </div>
 
+      <div id="sideboardZone" class="sideboard-zone panel drop-zone hidden" data-section="sideboard">
+        <div class="zone-label">
+          <span class="sideboard-icon">↔</span>
+          <div><span class="eyebrow">SIDEBOARD</span><h2>사이드보드</h2></div>
+          <span class="zone-count" id="sideboardCount">0 / 15</span>
+        </div>
+        <div id="sideboardCards" class="sideboard-cards"></div>
+        <div id="sideboardPlaceholder" class="drop-placeholder">
+          <strong>사이드보드 카드를 여기에 놓으세요</strong>
+          <span>메인 덱과 합쳐 카드명별 복사 제한을 검사합니다.</span>
+        </div>
+      </div>
+
       <div class="deck-layout">
         <div class="deck-board panel">
           <div class="board-heading">
             <div>
               <span class="eyebrow">MAIN DECK</span>
-              <h2>덱 구성</h2>
+              <h2 id="mainDeckHeading">메인 덱 구성</h2>
             </div>
             <div class="board-controls">
               <button class="btn small ghost" id="sortDeckBtn">자동 정렬</button>
@@ -222,7 +252,7 @@
       </div>
       <div class="db-note">
         <strong>브라우저 검색 범위</strong>
-        <span>카드명, 유형, 오라클 텍스트, 색·색 정체성, 마나 값, 세트, 희귀도, Commander 합법성 및 주요 Scryfall 연산자를 지원합니다. 한국어·일본어 인쇄본 검색과 복잡한 OR 구문은 온라인 검색을 사용합니다.</span>
+        <span>카드명, 유형, 오라클 텍스트, 색·색 정체성, 마나 값, 세트, 희귀도, 선택 포맷 합법성 및 주요 Scryfall 연산자를 지원합니다. 한국어·일본어 인쇄본 검색과 복잡한 OR 구문은 온라인 검색을 사용합니다.</span>
       </div>
       <div class="dialog-actions">
         <button class="btn ghost" value="cancel">닫기</button>

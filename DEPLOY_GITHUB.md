@@ -1,46 +1,54 @@
-# GitHub Pages 빠른 배포
+# GitHub Pages 배포 순서
 
-## 웹에서 파일 업로드
+## 1. 파일 구조 확인
 
-1. GitHub에서 새 저장소 생성
-2. 압축 해제
-3. 압축을 풀었을 때 보이는 `.github`, `public`, `scripts`, `package.json`, `index.html`을 저장소 루트에 업로드
-   - 상위 폴더 자체를 올리거나 ZIP 파일만 업로드하면 안 됩니다.
-4. Commit changes
-5. `Settings → Pages`
-6. Source를 `GitHub Actions`로 설정
-7. `Actions → Deploy Commander Canvas to GitHub Pages`에서 실행 결과 확인
-
-## Git 명령어 사용
-
-아래의 `<저장소주소>`를 본인의 GitHub 저장소 주소로 변경합니다.
-
-```bash
-git init
-git add .
-git commit -m "Initial Commander Canvas deployment"
-git branch -M main
-git remote add origin <저장소주소>
-git push -u origin main
-```
-
-그다음 GitHub 저장소에서:
+저장소 첫 화면에서 다음 항목이 바로 보여야 합니다.
 
 ```text
-Settings → Pages → Source → GitHub Actions
+.github/
+public/
+scripts/
+tests/
+package.json
+README.md
 ```
 
-## 카드 DB 강제 갱신
+압축파일 자체를 올리거나 전체 폴더를 한 단계 더 감싸면 Actions가 워크플로와 `public/index.html`을 찾지 못할 수 있습니다.
+
+## 2. Pages 설정
+
+```text
+Settings
+→ Pages
+→ Build and deployment
+→ Source
+→ GitHub Actions
+```
+
+## 3. 배포 실행
 
 ```text
 Actions
-→ Deploy Commander Canvas to GitHub Pages
+→ Deploy Deck Canvas to GitHub Pages
 → Run workflow
 ```
 
-웹앱의 `카드 DB → 지금 업데이트`는 GitHub Pages에 배포된 최신 DB를 브라우저에 받는 기능입니다. Scryfall에서 새 Bulk Data를 다시 생성하려면 GitHub Actions를 실행해야 합니다.
+`build`와 `deploy`가 모두 초록색 체크가 되어야 합니다.
 
+## 4. 접속 주소
 
-## 404가 표시될 때
+프로젝트 저장소:
 
-`CHECK_404.md`의 순서대로 저장소 구조, Pages Source, Actions 실행 상태와 접속 URL을 확인하세요.
+```text
+https://사용자명.github.io/저장소명/
+```
+
+사용자 사이트 저장소 이름이 정확히 `사용자명.github.io`인 경우에만 다음 주소를 사용합니다.
+
+```text
+https://사용자명.github.io/
+```
+
+## 5. 코드 업데이트
+
+수정한 파일을 `main` 브랜치에 Push하면 자동으로 다시 배포됩니다. 카드 DB는 예약 실행 또는 수동 실행 시 Scryfall Bulk Data를 확인합니다.

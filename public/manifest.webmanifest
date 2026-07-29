@@ -1,7 +1,7 @@
 {
-  "name": "Commander Canvas",
-  "short_name": "Commander Canvas",
-  "description": "Scryfall 기반 드래그 앤 드롭 커맨더 덱 빌더",
+  "name": "Deck Canvas",
+  "short_name": "Deck Canvas",
+  "description": "Scryfall 기반 Commander 및 60장 컨스트럭티드 MTG 덱 빌더",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
