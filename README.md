@@ -67,11 +67,17 @@ http://127.0.0.1:4173
 npm run check
 ```
 
-JavaScript 문법과 포맷별 복사 제한 테스트를 실행합니다.
+JavaScript 문법, 포맷별 복사 제한, 카드 DB 빌드 회귀 테스트를 실행합니다. 회귀 테스트는 로컬 테스트 서버를 사용하며 Scryfall에 접속하지 않습니다.
 
 ## 카드 DB 업데이트
 
 GitHub Actions는 매일 한 번 Scryfall Oracle Cards Bulk Data를 확인하여 변경된 경우 `public/data/cards.json.gz`를 재생성하고 Pages를 배포합니다. 웹앱에서는 `카드 DB → 지금 업데이트`를 눌러 배포된 최신 DB를 IndexedDB에 저장할 수 있습니다.
+
+```bash
+npm run build:data
+```
+
+v4.0.1부터 Scryfall의 `jsonl_download_uri`가 가리키는 압축 JSONL과 기존 `download_uri` JSON 배열을 모두 지원합니다. 브라우저에 배포하는 파일은 기존과 동일한 gzip 압축 JSON 배열입니다. `SCRYFALL_BULK_INFO_URL`을 지정한 경우 단일 Oracle Cards 메타데이터와 `/bulk-data` 목록 응답 모두 사용할 수 있습니다.
 
 - Scryfall Bulk Data: https://scryfall.com/docs/api/bulk-data
 - Scryfall API usage guidance: https://scryfall.com/docs/faqs/i-m-having-trouble-accessing-the-scryfall-api-or-i-m-blocked-17

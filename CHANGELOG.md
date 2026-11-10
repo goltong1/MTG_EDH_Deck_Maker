@@ -1,5 +1,13 @@
 # 변경 사항
 
+## v4.0.1
+
+- Scryfall의 최신 `jsonl_download_uri` / `.jsonl.gz` 응답을 지원하여 `build:data` 실패 수정
+- gzip 해제 후 JSONL을 카드별로 읽고, 기존 `download_uri` JSON 배열 형식도 지원
+- HTTP 전송 단계에서 이미 압축이 해제된 응답은 중복 해제하지 않도록 처리
+- 메타데이터 목록 응답에서 `oracle_cards` 항목 선택 및 HTTP 오류 상세 메시지 개선
+- 카드 DB 빌드 회귀 테스트를 `npm run check`와 Pages 빌드에 추가
+
 ## v4.0.0
 
 - Commander 모드 유지

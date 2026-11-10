@@ -1,15 +1,16 @@
 import { mkdir, readFile, writeFile, copyFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gzip } from 'node:zlib';
+import { gzip, gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
 
 const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outputDir = path.join(root, 'public', 'data');
 const cacheDir = path.resolve(process.env.SCRYFALL_CACHE_DIR || path.join(root, '.cache', 'scryfall'));
-const bulkInfoUrl = process.env.SCRYFALL_BULK_INFO_URL || 'https://api.scryfall.com/bulk-data/oracle-cards';
-const userAgent = process.env.SCRYFALL_USER_AGENT || 'DeckCanvasGithubPages/2.0 (GitHub Pages deck builder)';
+const bulkInfoUrl = process.env.SCRYFALL_BULK_INFO_URL || 'https://api.scryfall.com/bulk-data/oracle_cards';
+const userAgent = process.env.SCRYFALL_USER_AGENT || 'DeckCanvasGithubPages/4.0.1 (GitHub Pages deck builder)';
 const minCards = Number(process.env.SCRYFALL_MIN_CARDS || 1000);
 
 const outputCards = path.join(outputDir, 'cards.json.gz');
@@ -22,26 +23,37 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function fetchWithRetry(url, { timeoutMs = 60_000, retries = 3 } = {}) {
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
+    let response;
     try {
-      const response = await fetch(url, {
+      response = await fetch(url, {
         signal: AbortSignal.timeout(timeoutMs),
         headers: {
           'User-Agent': userAgent,
           'Accept': 'application/json;q=0.9,*/*;q=0.8'
         }
       });
-      if ((response.status === 429 || response.status >= 500) && attempt < retries) {
-        const retryAfter = Number(response.headers.get('retry-after'));
-        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 750 * (2 ** attempt));
-        continue;
-      }
-      if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      return response;
     } catch (error) {
       lastError = error;
       if (attempt >= retries) throw error;
       await sleep(750 * (2 ** attempt));
+      continue;
     }
+    if (response.ok) return response;
+    const body = await response.text();
+    let detail = body;
+    try {
+      const error = JSON.parse(body);
+      detail = error.details || error.message || body;
+    } catch { /* Non-JSON error pages still provide a useful diagnostic. */ }
+    lastError = new Error(`HTTP ${response.status} ${response.statusText} from ${url}: ${detail.slice(0, 500)}`);
+    if ((response.status === 429 || response.status >= 500) && attempt < retries) {
+      const retryAfter = response.headers.get('retry-after');
+      const seconds = Number(retryAfter);
+      const delay = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : Date.parse(retryAfter) - Date.now();
+      await sleep(Number.isFinite(delay) && delay > 0 ? delay : 750 * (2 ** attempt));
+      continue;
+    }
+    throw lastError;
   }
   throw lastError;
 }
@@ -105,6 +117,72 @@ function compactCard(card = {}) {
   };
 }
 
+function selectBulkInfo(payload) {
+  if (payload?.object === 'error') {
+    throw new Error(`Scryfall bulk metadata error: ${payload.details || payload.code || 'unknown error'}`);
+  }
+  // Both /bulk-data/:type and the /bulk-data list endpoint are supported.
+  const info = Array.isArray(payload?.data)
+    ? payload.data.find(item => item?.type === 'oracle_cards')
+    : payload;
+  if (!info || info.type !== 'oracle_cards') {
+    throw new Error('Scryfall bulk metadata does not contain an oracle_cards entry.');
+  }
+  if (!(typeof info.jsonl_download_uri === 'string' && info.jsonl_download_uri.trim()) &&
+      !(typeof info.download_uri === 'string' && info.download_uri.trim())) {
+    throw new Error('Scryfall Oracle Cards metadata does not contain jsonl_download_uri or download_uri.');
+  }
+  return info;
+}
+
+async function downloadCompactCards(info) {
+  // Current Scryfall exports use gzip-compressed JSON Lines. Older exports
+  // used a JSON array, so retain support for download_uri as well.
+  const url = info.jsonl_download_uri?.trim() || info.download_uri.trim();
+  const jsonl = Boolean(info.jsonl_download_uri?.trim()) || /\.jsonl(?:\.gz)?(?:[?#]|$)/i.test(url);
+  console.log(`Downloading ${jsonl ? 'JSONL' : 'JSON'} bulk file: ${url}`);
+  const response = await fetchWithRetry(url, { timeoutMs: 600_000, retries: 2 });
+  let bytes = Buffer.from(await response.arrayBuffer());
+  // fetch already decodes HTTP Content-Encoding. Inspect the actual bytes
+  // instead of the .gz suffix to avoid decompressing the same payload twice.
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    bytes = await gunzipAsync(bytes);
+  }
+  const text = bytes.toString('utf8').replace(/^\uFEFF/, '');
+  const compactCards = [];
+  const appendCard = (card, location) => {
+    if (!card || card.object !== 'card') {
+      throw new Error(`Invalid card object in Scryfall bulk data (${location}).`);
+    }
+    compactCards.push(compactCard(card));
+  };
+  if (jsonl) {
+    // Compact one record at a time; do not retain a second full raw-card array.
+    let start = 0;
+    let lineNumber = 0;
+    while (start < text.length) {
+      let end = text.indexOf('\n', start);
+      if (end === -1) end = text.length;
+      const line = text.slice(start, end).trim();
+      start = end + 1;
+      lineNumber += 1;
+      if (!line) continue;
+      let card;
+      try { card = JSON.parse(line); }
+      catch (error) { throw new Error(`Invalid Scryfall JSONL at line ${lineNumber}: ${error.message}`); }
+      appendCard(card, `line ${lineNumber}`);
+    }
+  } else {
+    const rawCards = JSON.parse(text);
+    if (!Array.isArray(rawCards)) throw new Error('Unexpected bulk card data: not an array.');
+    rawCards.forEach((card, index) => appendCard(card, `index ${index}`));
+  }
+  if (compactCards.length < minCards) {
+    throw new Error(`Unexpected bulk card count: ${compactCards.length} (minimum ${minCards})`);
+  }
+  return compactCards;
+}
+
 async function readJson(file) {
   try { return JSON.parse(await readFile(file, 'utf8')); }
   catch { return null; }
@@ -119,11 +197,10 @@ await mkdir(outputDir, { recursive: true });
 await mkdir(cacheDir, { recursive: true });
 
 console.log(`Reading bulk metadata: ${bulkInfoUrl}`);
-const info = await (await fetchWithRetry(bulkInfoUrl, { timeoutMs: 30_000 })).json();
-if (!info.download_uri) throw new Error('Scryfall bulk metadata does not contain download_uri.');
+const info = selectBulkInfo(await (await fetchWithRetry(bulkInfoUrl, { timeoutMs: 30_000 })).json());
 
 const previous = await readJson(cacheMeta);
-if (previous?.version === info.updated_at && await fileExists(cacheCards)) {
+if (previous?.ready && previous.cardCount >= minCards && previous.version === info.updated_at && await fileExists(cacheCards)) {
   console.log(`Bulk data is unchanged (${info.updated_at}). Reusing cached compressed DB.`);
   const cachedBytes = (await stat(cacheCards)).size;
   const meta = {
@@ -138,13 +215,8 @@ if (previous?.version === info.updated_at && await fileExists(cacheCards)) {
 }
 
 console.log(`Downloading Oracle Cards bulk data updated at ${info.updated_at}...`);
-const rawCards = await (await fetchWithRetry(info.download_uri, { timeoutMs: 600_000, retries: 2 })).json();
-if (!Array.isArray(rawCards) || rawCards.length < minCards) {
-  throw new Error(`Unexpected bulk card count: ${Array.isArray(rawCards) ? rawCards.length : 'not an array'}`);
-}
-
-console.log(`Compacting ${rawCards.length.toLocaleString()} cards...`);
-const compactCards = rawCards.map(compactCard);
+const compactCards = await downloadCompactCards(info);
+console.log(`Compacted ${compactCards.length.toLocaleString()} cards.`);
 const json = JSON.stringify(compactCards);
 console.log(`Compressing ${(Buffer.byteLength(json) / 1024 / 1024).toFixed(1)} MiB JSON...`);
 const compressed = await gzipAsync(Buffer.from(json), { level: 9 });

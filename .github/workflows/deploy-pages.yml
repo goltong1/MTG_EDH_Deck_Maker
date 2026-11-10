@@ -36,6 +36,9 @@ jobs:
           restore-keys: |
             scryfall-oracle-
 
+      - name: Check scripts and regression tests
+        run: npm run check
+
       - name: Build compressed local card database
         run: npm run build:data
 
