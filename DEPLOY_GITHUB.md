@@ -52,3 +52,6 @@ https://사용자명.github.io/
 ## 5. 코드 업데이트
 
 수정한 파일을 `main` 브랜치에 Push하면 자동으로 다시 배포됩니다. 카드 DB는 예약 실행 또는 수동 실행 시 Scryfall Bulk Data를 확인합니다.
+
+
+v4.1은 `deploy-pages.yml`만 자동 실행됩니다. 기존 Jekyll/정적 배포/패키지 배포 템플릿은 동일한 파일명으로 비활성화했으므로, `.github/workflows`도 함께 덮어써 주세요. 이 패키지는 별도의 npm 의존성 설치 없이 `npm run check`, `npm run build:data`를 실행합니다.

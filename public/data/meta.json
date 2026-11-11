@@ -1,12 +1,12 @@
 {
   "object": "deck_canvas_card_database",
-  "ready": false,
-  "version": null,
-  "sourceUpdatedAt": null,
-  "builtAt": null,
-  "checkedAt": null,
-  "cardCount": 0,
-  "compressedBytes": 0,
-  "downloadPath": "./data/cards.json.gz",
-  "message": "Run npm run build:data or deploy through GitHub Actions to generate the card database."
+  "ready": true,
+  "version": "2026-11-09T22:02:04.400+00:00",
+  "sourceType": "oracle_cards",
+  "sourceUpdatedAt": "2026-11-09T22:02:04.400+00:00",
+  "builtAt": "2026-11-10T07:06:31.741Z",
+  "checkedAt": "2026-11-10T07:06:31.741Z",
+  "cardCount": 39288,
+  "compressedBytes": 10479242,
+  "downloadPath": "./data/cards.json.gz"
 }

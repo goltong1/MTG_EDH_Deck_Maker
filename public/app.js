@@ -1,3 +1,6 @@
+import { t, getLanguage, setLanguage, locale, translateDocument } from './i18n.js';
+import { normalizeText, createCardNameIndex } from './card-catalog.js';
+import { FILTER_OPTIONS, emptyFilters, matchesVisualFilters, visualFilterQuery, sectionForCard, mainDropTarget } from './card-filters.js';
 import { FORMAT_DEFS, formatConfig, cardCopyLimit, isFormatPlayableStatus, legalityStatus, groupedNameCounts } from './deck-rules.js';
 
 const SECTION_DEFS = [
@@ -15,6 +18,8 @@ const SECTION_DEFS = [
 const COLOR_NAMES = { W: '백', U: '청', B: '흑', R: '적', G: '녹' };
 const STORAGE_KEY = 'commander-canvas.deck.v1';
 const SEARCH_SOURCE_KEY = 'commander-canvas.search-source.v1';
+const SEARCH_VIEW_KEY = 'deck-canvas.search-view.v1';
+const DECK_VIEW_KEY = 'deck-canvas.deck-view.v1';
 const LOCAL_DB_CONFIG_KEY = 'commander-canvas.local-db-config.v2';
 const LOCAL_DB_NAME = 'commander-canvas-card-db';
 const LOCAL_DB_STORE = 'data';
@@ -26,7 +31,12 @@ let localById = new Map();
 let scryfallRequestChain = Promise.resolve();
 let nextScryfallRequestAt = 0;
 const state = {
-  deckName: '새 커맨더 덱',
+  deckName: t("새 커맨더 덱"),
+  defaultDeckName: true,
+  filters: emptyFilters(),
+  searchOrder: 'edhrec',
+  loading: false,
+  searchError: null,
   format: 'commander',
   commanders: [],
   sideboard: [],
@@ -38,7 +48,8 @@ const state = {
   page: 1,
   totalCards: 0,
   hasMore: false,
-  view: 'grid',
+  view: localStorage.getItem(SEARCH_VIEW_KEY) === 'list' ? 'list' : 'grid',
+  deckView: localStorage.getItem(DECK_VIEW_KEY) === 'text' ? 'text' : 'cards',
   dirty: false,
   importMode: false,
   exportFormat: 'arena',
@@ -84,7 +95,7 @@ function cardMana(card) {
 function cardImage(card, size = 'normal') {
   return card.image_uris?.[size] || card.card_faces?.find(face => face.image_uris)?.image_uris?.[size] || '';
 }
-function cardName(card) { return card.name || card.card_faces?.map(face => face.name).join(' // ') || '이름 없음'; }
+function cardName(card) { return card.name || card.card_faces?.map(face => face.name).join(' // ') || t("이름 없음"); }
 function entryKey(card) { return card.oracle_id || card.id || cardName(card).toLowerCase(); }
 function isBasicLand(card) { return /Basic Land/i.test(card.type_line || ''); }
 function currentFormat() { return formatConfig(state.format); }
@@ -95,19 +106,6 @@ function allMainEntries() { return Object.values(state.sections).flat(); }
 function allEntries() { return isCommanderMode() ? [...state.commanders, ...allMainEntries()] : [...allMainEntries(), ...state.sideboard]; }
 function allCardsExpanded() { return allEntries().flatMap(entry => Array.from({ length: entry.qty }, () => entry.card)); }
 function sideboardCardsExpanded() { return state.sideboard.flatMap(entry => Array.from({ length: entry.qty }, () => entry.card)); }
-
-function sectionForCard(card) {
-  const type = card.type_line || '';
-  if (/Land/i.test(type)) return 'land';
-  if (/Creature/i.test(type)) return 'creature';
-  if (/Instant/i.test(type)) return 'instant';
-  if (/Sorcery/i.test(type)) return 'sorcery';
-  if (/Artifact/i.test(type)) return 'artifact';
-  if (/Enchantment/i.test(type)) return 'enchantment';
-  if (/Planeswalker/i.test(type)) return 'planeswalker';
-  if (/Battle/i.test(type)) return 'battle';
-  return 'other';
-}
 
 function renderMana(text = '') {
   let html = escapeHtml(text).replace(/\n/g, '<br>');
@@ -127,13 +125,14 @@ function toast(message, type = '') {
 
 function markDirty() {
   state.dirty = true;
-  elements.autosaveStatus.textContent = '저장되지 않은 변경사항';
+  elements.autosaveStatus.textContent = t("저장되지 않은 변경사항");
 }
 
 function persistDeck(showToast = false) {
   const payload = {
     version: 2,
     deckName: state.deckName,
+    defaultDeckName: state.defaultDeckName,
     format: state.format,
     commanders: state.commanders,
     sideboard: state.sideboard,
@@ -142,8 +141,8 @@ function persistDeck(showToast = false) {
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   state.dirty = false;
-  elements.autosaveStatus.textContent = `브라우저에 저장됨 · ${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`;
-  if (showToast) toast('덱을 브라우저에 저장했습니다.', 'success');
+  elements.autosaveStatus.textContent = t("브라우저에 저장됨 · {p0}", { p0: new Date().toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' }) });
+  if (showToast) toast(t("덱을 브라우저에 저장했습니다."), 'success');
 }
 
 function loadSavedDeck() {
@@ -152,14 +151,15 @@ function loadSavedDeck() {
   try {
     const saved = JSON.parse(raw);
     state.deckName = saved.deckName || state.deckName;
+    state.defaultDeckName = saved.defaultDeckName ?? false;
     state.format = FORMAT_DEFS[saved.format] ? saved.format : 'commander';
     state.commanders = Array.isArray(saved.commanders) ? saved.commanders : [];
     state.sideboard = Array.isArray(saved.sideboard) ? saved.sideboard : [];
     for (const [id] of SECTION_DEFS) state.sections[id] = Array.isArray(saved.sections?.[id]) ? saved.sections[id] : [];
     elements.deckName.value = state.deckName;
-    elements.autosaveStatus.textContent = '저장된 덱을 불러옴';
+    elements.autosaveStatus.textContent = t("저장된 덱을 불러옴");
   } catch {
-    toast('저장된 덱을 읽지 못했습니다.', 'error');
+    toast(t("저장된 덱을 읽지 못했습니다."), 'error');
   }
 }
 
@@ -169,8 +169,9 @@ function createSections() {
     const section = template.content.firstElementChild.cloneNode(true);
     section.dataset.section = id;
     section.querySelector('.section-icon').textContent = icon;
-    section.querySelector('.section-name').textContent = name;
-    section.querySelector('.section-header').addEventListener('click', () => section.classList.toggle('collapsed'));
+    section.querySelector('.section-name').textContent = t(name);
+    section.querySelector('.section-header').setAttribute('aria-expanded', 'true');
+    section.querySelector('.section-header').addEventListener('click', event => { section.classList.toggle('collapsed'); event.currentTarget.setAttribute('aria-expanded', String(!section.classList.contains('collapsed'))); });
     setupDropZone(section, id);
     elements.deckSections.append(section);
   }
@@ -180,6 +181,7 @@ function setDragData(event, payload) {
   event.dataTransfer.effectAllowed = 'copyMove';
   event.dataTransfer.setData('application/x-commander-card', JSON.stringify(payload));
   event.dataTransfer.setData('text/plain', payload.cardId || 'card');
+  document.body.classList.add('dragging-card');
 }
 function getDragData(event) {
   try { return JSON.parse(event.dataTransfer.getData('application/x-commander-card')); }
@@ -189,6 +191,7 @@ function getDragData(event) {
 function setupDropZone(node, targetSection) {
   node.addEventListener('dragover', event => {
     event.preventDefault();
+    event.stopPropagation();
     event.dataTransfer.dropEffect = targetSection === 'trash' ? 'move' : 'copy';
     node.classList.add('drag-over');
   });
@@ -197,7 +200,8 @@ function setupDropZone(node, targetSection) {
   });
   node.addEventListener('drop', event => {
     event.preventDefault();
-    node.classList.remove('drag-over');
+    event.stopPropagation();
+    document.querySelectorAll('.drag-over').forEach(zone => zone.classList.remove('drag-over'));
     const payload = getDragData(event);
     if (!payload) return;
     if (targetSection === 'trash') {
@@ -232,7 +236,7 @@ function removeDeckEntry(section, key, all = true) {
 function isCommanderCandidate(card) {
   const type = card.type_line || '';
   const text = cardOracle(card);
-  return /Legendary Creature/i.test(type) || /can be your commander/i.test(text) || /Legendary Enchantment.*Background/i.test(type);
+  return (/\bLegendary\b/i.test(type.split(' // ')[0]) && /\bCreature\b/i.test(type.split(' // ')[0])) || /can be your commander/i.test(text) || /Legendary Enchantment.*Background/i.test(type);
 }
 
 function copiesAcrossDeck(card) {
@@ -249,28 +253,29 @@ function copyLimitMessage(card) {
   const limit = cardCopyLimit(card, state.format);
   const format = currentFormat();
   if (!Number.isFinite(limit)) return '';
-  if (limit === 1 && legalityStatus(card, state.format) === 'restricted') return `${format.label} 제한 카드는 메인 덱과 사이드보드를 합쳐 1장만 사용할 수 있습니다.`;
+  if (limit === 1 && legalityStatus(card, state.format) === 'restricted') return t("{p0} 제한 카드는 메인 덱과 사이드보드를 합쳐 1장만 사용할 수 있습니다.", { p0: format.label });
   return isCommanderMode()
-    ? `${format.label}에서는 ${cardName(card)}을(를) 덱 전체에 ${limit}장까지 사용할 수 있습니다.`
-    : `${format.label}에서는 ${cardName(card)}을(를) 메인 덱과 사이드보드 합계 ${limit}장까지 사용할 수 있습니다.`;
+    ? t("{p0}에서는 {p1}을(를) 덱 전체에 {p2}장까지 사용할 수 있습니다.", { p0: format.label, p1: cardName(card), p2: limit })
+    : t("{p0}에서는 {p1}을(를) 메인 덱과 사이드보드 합계 {p2}장까지 사용할 수 있습니다.", { p0: format.label, p1: cardName(card), p2: limit });
 }
 
 function addCard(card, section = sectionForCard(card), quantity = 1, quiet = false) {
   if (!card) return;
+  section = mainDropTarget(card, section);
   const qty = Math.max(1, Number(quantity || 1));
 
   if (section === 'commander') {
     if (!isCommanderMode()) {
-      if (!quiet) toast('현재 포맷에는 커맨드 존이 없습니다.', 'error');
+      if (!quiet) toast(t("현재 포맷에는 커맨드 존이 없습니다."), 'error');
       return;
     }
     if (!isCommanderCandidate(card)) {
-      if (!quiet) toast('이 카드는 기본적으로 커맨더로 지정할 수 없습니다.', 'error');
+      if (!quiet) toast(t("이 카드는 기본적으로 커맨더로 지정할 수 없습니다."), 'error');
       return;
     }
     if (state.commanders.some(entry => cardName(entry.card) === cardName(card))) return;
     if (state.commanders.length >= 2) {
-      if (!quiet) toast('커맨더 영역에는 최대 2장까지만 놓을 수 있습니다.', 'error');
+      if (!quiet) toast(t("커맨더 영역에는 최대 2장까지만 놓을 수 있습니다."), 'error');
       return;
     }
     state.commanders.push({ card, qty: 1 });
@@ -289,7 +294,7 @@ function addCard(card, section = sectionForCard(card), quantity = 1, quiet = fal
     else list.push({ card, qty });
   }
   markDirty(); renderDeck();
-  if (!quiet) toast(`${cardName(card)} 추가`, 'success');
+  if (!quiet) toast(t("{p0} 추가", { p0: cardName(card) }), 'success');
 }
 
 function handleDrop(payload, targetSection) {
@@ -297,28 +302,30 @@ function handleDrop(payload, targetSection) {
     addCard(findSearchCard(payload.cardId), targetSection);
     return;
   }
-  if (payload.source !== 'deck' || payload.fromSection === targetSection) return;
+  if (payload.source !== 'deck') return;
 
   const sourceList = listForSection(payload.fromSection);
   const sourceIndex = sourceList?.findIndex(entry => entryKey(entry.card) === payload.entryKey) ?? -1;
   if (sourceIndex < 0) return;
   const entry = sourceList[sourceIndex];
   const card = entry.card;
+  targetSection = mainDropTarget(card, targetSection);
+  if (payload.fromSection === targetSection) return;
 
   if (targetSection === 'commander') {
-    if (!isCommanderMode()) return toast('현재 포맷에는 커맨드 존이 없습니다.', 'error');
-    if (!isCommanderCandidate(card)) return toast('이 카드는 기본적으로 커맨더로 지정할 수 없습니다.', 'error');
-    if (entry.qty !== 1) return toast('커맨더로 옮기려면 카드 수량을 1장으로 맞춰주세요.', 'error');
-    if (state.commanders.length >= 2) return toast('커맨더 영역에는 최대 2장까지만 놓을 수 있습니다.', 'error');
+    if (!isCommanderMode()) return toast(t("현재 포맷에는 커맨드 존이 없습니다."), 'error');
+    if (!isCommanderCandidate(card)) return toast(t("이 카드는 기본적으로 커맨더로 지정할 수 없습니다."), 'error');
+    if (entry.qty !== 1) return toast(t("커맨더로 옮기려면 카드 수량을 1장으로 맞춰주세요."), 'error');
+    if (state.commanders.length >= 2) return toast(t("커맨더 영역에는 최대 2장까지만 놓을 수 있습니다."), 'error');
     if (state.commanders.some(item => cardName(item.card) === cardName(card))) return;
   }
 
-  if (targetSection === 'sideboard' && isCommanderMode()) return toast('Commander 포맷에는 사이드보드 영역을 사용하지 않습니다.', 'error');
+  if (targetSection === 'sideboard' && isCommanderMode()) return toast(t("Commander 포맷에는 사이드보드 영역을 사용하지 않습니다."), 'error');
   const destination = targetSection === 'commander' ? state.commanders : (listForSection(targetSection) || state.sections.other);
   const existing = targetSection === 'commander' ? null : destination.find(item => entryKey(item.card) === entryKey(card));
 
   if (isCommanderMode() && targetSection !== 'commander' && existing && !allowsMultiple(card)) {
-    return toast('Commander 덱의 같은 이름 카드는 기본적으로 1장만 사용할 수 있습니다.', 'error');
+    return toast(t("Commander 덱의 같은 이름 카드는 기본적으로 1장만 사용할 수 있습니다."), 'error');
   }
 
   sourceList.splice(sourceIndex, 1);
@@ -352,27 +359,31 @@ function changeFormat(nextFormat) {
     state.sideboard = [];
   }
   state.format = nextFormat;
+  if (!willCommander) state.filters.commander = false;
+  renderVisualFilters();
   markDirty();
   renderDeck();
   searchCards(state.query, 1);
-  toast(`${currentFormat().label} 포맷으로 변경했습니다. 기존 카드는 삭제하지 않고 새 규칙으로 검사합니다.`, 'success');
+  toast(t("{p0} 포맷으로 변경했습니다. 기존 카드는 삭제하지 않고 새 규칙으로 검사합니다.", { p0: currentFormat().label }), 'success');
 }
 
 function renderFormatUi() {
   const format = currentFormat();
   elements.deckFormat.value = state.format;
-  elements.formatRuleHint.textContent = format.hint;
+  elements.formatRuleHint.textContent = t(format.hint);
   elements.commanderZone.classList.toggle('hidden', format.mode !== 'commander');
   elements.sideboardZone.classList.toggle('hidden', format.mode === 'commander');
   elements.commanderQuickFilter.classList.toggle('hidden', format.mode !== 'commander');
-  elements.popularQuickFilter.textContent = format.mode === 'commander' ? 'EDH 인기' : '포맷 전체';
-  elements.legalOnlyLabel.textContent = `${format.label} 사용 가능`;
-  elements.mainDeckHeading.textContent = format.mode === 'commander' ? '메인 덱 구성' : `${format.label} 메인 덱`;
-  elements.totalTargetLabel.textContent = format.mode === 'commander' ? '/ 100장' : `/ ${format.mainMin}+장`;
+  elements.popularQuickFilter.textContent = t('추천 카드');
+  elements.legalOnlyLabel.textContent = t("{p0} 사용 가능", { p0: format.label });
+  elements.mainDeckHeading.textContent = format.mode === 'commander' ? t("메인 덱 구성") : t("{p0} 메인 덱", { p0: format.label });
+  elements.totalTargetLabel.textContent = format.mode === 'commander' ? t("/ 100장") : t("/ {p0}+장", { p0: format.mainMin });
 }
 
 function renderDeck() {
   renderFormatUi();
+  renderDeckViewControls();
+  if (state.defaultDeckName) state.deckName = t('새 {format} 덱', { format: getLanguage() === 'ko' ? (currentFormat().labelKo || currentFormat().label) : currentFormat().label });
   elements.deckName.value = state.deckName;
   elements.commanderCards.innerHTML = '';
   for (const entry of state.commanders) elements.commanderCards.append(createDeckCard(entry, 'commander', 'commander'));
@@ -386,10 +397,12 @@ function renderDeck() {
 
   for (const [id] of SECTION_DEFS) {
     const sectionNode = elements.deckSections.querySelector(`[data-section="${id}"]`);
+    sectionNode.querySelector('.section-name').textContent = t(SECTION_DEFS.find(([key]) => key === id)[1]);
     const body = sectionNode.querySelector('.section-body');
+    body.dataset.empty = t('아직 카드가 없습니다');
     body.innerHTML = '';
     for (const entry of state.sections[id]) body.append(createDeckCard(entry, id, 'main'));
-    sectionNode.querySelector('.section-count').textContent = `${totalEntryQty(state.sections[id])}장`;
+    sectionNode.querySelector('.section-count').textContent = t("{p0}장", { p0: totalEntryQty(state.sections[id]) });
   }
   updateAnalyticsAndValidation();
 }
@@ -398,17 +411,27 @@ function createDeckCard(entry, section, variant = 'main') {
   const card = entry.card;
   const commander = variant === 'commander';
   const sideboard = variant === 'sideboard';
+  const textView = state.deckView === 'text';
   const node = document.createElement('article');
   node.className = commander ? 'commander-card' : sideboard ? 'sideboard-card' : 'deck-card';
+  if (textView) node.classList.add('text-card');
   node.draggable = true;
   node.title = `${cardName(card)}\n${card.type_line || ''}`;
   const showQtyControls = !commander && (isCommanderMode() ? allowsMultiple(card) : true);
-  node.innerHTML = `
-    <img src="${escapeHtml(cardImage(card, commander ? 'normal' : 'small'))}" alt="${escapeHtml(cardName(card))}" loading="lazy">
-    <button class="remove-card" title="제거" aria-label="제거">×</button>
-    ${!commander && entry.qty > 1 ? `<span class="qty-pill">×${entry.qty}</span>` : ''}
-    ${showQtyControls ? `<span class="qty-controls"><button data-qty="minus">−</button><button data-qty="plus">+</button></span>` : ''}
-  `;
+  node.tabIndex = 0;
+  node.setAttribute('aria-label', `${cardName(card)} · ${entry.qty}`);
+  node.innerHTML = commander && !textView ? `
+    <img src="${escapeHtml(cardImage(card, 'normal'))}" alt="${escapeHtml(cardName(card))}" loading="lazy">
+    <div class="commander-caption"><strong>${escapeHtml(cardName(card))}</strong><span>${renderMana(cardMana(card))}</span></div>
+    <button class="remove-card" title="${t('제거')}" aria-label="${t('제거')}">×</button>` : `
+    <span class="row-quantity">${entry.qty}</span>
+    ${textView ? '' : `<img class="row-art" src="${escapeHtml(cardImage(card, 'art_crop') || cardImage(card, 'small'))}" alt="" loading="lazy">`}
+    <span class="deck-row-copy"><strong>${escapeHtml(cardName(card))}</strong><span>${textView ? escapeHtml(cardMana(card)) || '—' : renderMana(cardMana(card)) || '—'}</span></span>
+    <span class="row-actions">
+      ${showQtyControls ? `<button data-qty="minus" aria-label="${t('수량 줄이기')}">−</button><button data-qty="plus" aria-label="${t('수량 늘리기')}">+</button>` : ''}
+      <button class="remove-card" title="${t('제거')}" aria-label="${t('제거')}">×</button>
+    </span>`;
+  node.addEventListener('keydown', event => { if (event.target === node && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); showCardDialog(card); } });
   node.addEventListener('dragstart', event => setDragData(event, { source: 'deck', cardId: card.id, fromSection: section, entryKey: entryKey(card) }));
   node.addEventListener('dblclick', () => showCardDialog(card));
   node.querySelector('.remove-card').addEventListener('click', event => { event.stopPropagation(); removeDeckEntry(section, entryKey(card)); });
@@ -422,6 +445,26 @@ function createDeckCard(entry, section, variant = 'main') {
     markDirty(); renderDeck();
   }));
   return node;
+}
+
+function renderDeckViewControls() {
+  const textView = state.deckView === 'text';
+  document.querySelector('.workspace').dataset.deckView = state.deckView;
+  document.querySelectorAll('.deck-view-switch button').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.deckView === state.deckView));
+  });
+  el('deckTextActions').classList.toggle('hidden', !textView);
+  el('deckTextHint').classList.toggle('hidden', !textView);
+  elements.deckSections.dataset.empty = t('아직 카드가 없습니다');
+  const empty = allEntries().length === 0;
+  el('copyDeckListBtn').disabled = empty;
+  el('downloadPlainDeckBtn').disabled = empty;
+}
+
+function setDeckView(view) {
+  state.deckView = view === 'text' ? 'text' : 'cards';
+  try { localStorage.setItem(DECK_VIEW_KEY, state.deckView); } catch { /* View switching still works. */ }
+  renderDeck();
 }
 
 function commanderIdentity() {
@@ -452,46 +495,46 @@ function validateDeck() {
 
   if (isCommanderMode()) {
     const identity = commanderIdentity();
-    if (state.commanders.length === 0) errors.push('커맨더를 1장 이상 지정하세요.');
-    if (state.commanders.length > 2) errors.push('커맨더는 최대 2장입니다.');
+    if (state.commanders.length === 0) errors.push(t("커맨더를 1장 이상 지정하세요."));
+    if (state.commanders.length > 2) errors.push(t("커맨더는 최대 2장입니다."));
     if (state.commanders.length === 2 && !commanderPairCompatible(state.commanders[0].card, state.commanders[1].card)) {
-      warnings.push('두 커맨더의 Partner·Background 등 동시 사용 조건을 직접 확인하세요.');
+      warnings.push(t("두 커맨더의 Partner·Background 등 동시 사용 조건을 직접 확인하세요."));
     }
-    if (total !== format.exactTotal) errors.push(`현재 ${total}장입니다. 커맨더를 포함해 정확히 ${format.exactTotal}장이 필요합니다.`);
+    if (total !== format.exactTotal) errors.push(t("현재 {p0}장입니다. 커맨더를 포함해 정확히 {p1}장이 필요합니다.", { p0: total, p1: format.exactTotal }));
 
     const byName = groupedNameCounts([state.commanders, allMainEntries()]);
     for (const [name, item] of byName) {
       const limit = cardCopyLimit(item.card, state.format);
-      if (Number.isFinite(limit) && item.qty > limit) errors.push(`중복 카드: ${name} ×${item.qty} · 허용 ${limit}장`);
+      if (Number.isFinite(limit) && item.qty > limit) errors.push(t("중복 카드: {p0} ×{p1} · 허용 {p2}장", { p0: name, p1: item.qty, p2: limit }));
     }
 
     for (const entry of allEntries()) {
       const card = entry.card;
       const legality = legalityStatus(card, state.format);
-      if (!isFormatPlayableStatus(legality)) errors.push(`${cardName(card)}: Commander에서 ${legality}`);
-      if (state.commanders.length && !subsetOf(card.color_identity, identity)) errors.push(`${cardName(card)}의 색 정체성이 커맨더 범위를 벗어납니다.`);
+      if (!isFormatPlayableStatus(legality)) errors.push(t("{p0}: Commander에서 {p1}", { p0: cardName(card), p1: legality }));
+      if (state.commanders.length && !subsetOf(card.color_identity, identity)) errors.push(t("{p0}의 색 정체성이 커맨더 범위를 벗어납니다.", { p0: cardName(card) }));
     }
-    if (state.commanders.length && identity.size === 0) warnings.push('무색 커맨더 덱으로 검사 중입니다.');
+    if (state.commanders.length && identity.size === 0) warnings.push(t("무색 커맨더 덱으로 검사 중입니다."));
   } else {
-    if (mainCount < format.mainMin) errors.push(`메인 덱이 ${mainCount}장입니다. ${format.label}는 최소 ${format.mainMin}장이 필요합니다.`);
-    if (sideboardCount > format.sideboardMax) errors.push(`사이드보드가 ${sideboardCount}장입니다. 최대 ${format.sideboardMax}장까지 사용할 수 있습니다.`);
+    if (mainCount < format.mainMin) errors.push(t("메인 덱이 {p0}장입니다. {p1}는 최소 {p2}장이 필요합니다.", { p0: mainCount, p1: format.label, p2: format.mainMin }));
+    if (sideboardCount > format.sideboardMax) errors.push(t("사이드보드가 {p0}장입니다. 최대 {p1}장까지 사용할 수 있습니다.", { p0: sideboardCount, p1: format.sideboardMax }));
 
     const byName = groupedNameCounts([allMainEntries(), state.sideboard]);
     for (const [name, item] of byName) {
       const limit = cardCopyLimit(item.card, state.format);
       if (Number.isFinite(limit) && item.qty > limit) {
         const restricted = legalityStatus(item.card, state.format) === 'restricted';
-        errors.push(`${name} ×${item.qty}: ${restricted ? '제한 카드라 합계 1장만' : `메인 덱과 사이드보드 합계 ${limit}장까지`} 사용할 수 있습니다.`);
+        errors.push(t("{p0} ×{p1}: {p2} 사용할 수 있습니다.", { p0: name, p1: item.qty, p2: restricted ? t("제한 카드라 합계 1장만") : t("메인 덱과 사이드보드 합계 {p0}장까지", { p0: limit }) }));
       }
     }
 
     for (const entry of allEntries()) {
       const card = entry.card;
       const legality = legalityStatus(card, state.format);
-      if (!isFormatPlayableStatus(legality)) errors.push(`${cardName(card)}: ${format.label}에서 ${legality}`);
-      else if (legality === 'restricted') warnings.push(`${cardName(card)}은(는) ${format.label} 제한 카드이며 합계 1장만 허용됩니다.`);
+      if (!isFormatPlayableStatus(legality)) errors.push(t("{p0}: {p1}에서 {p2}", { p0: cardName(card), p1: format.label, p2: legality }));
+      else if (legality === 'restricted') warnings.push(t("{p0}은(는) {p1} 제한 카드이며 합계 1장만 허용됩니다.", { p0: cardName(card), p1: format.label }));
     }
-    if (['historic', 'timeless', 'alchemy'].includes(state.format)) warnings.push('Arena 디지털 포맷은 BO3 사이드보드 최대 15장 기준으로 검사합니다. BO1 이벤트는 더 작은 제한이 적용될 수 있습니다.');
+    if (['historic', 'timeless', 'alchemy'].includes(state.format)) warnings.push(t("Arena 디지털 포맷은 BO3 사이드보드 최대 15장 기준으로 검사합니다. BO1 이벤트는 더 작은 제한이 적용될 수 있습니다."));
   }
 
   return {
@@ -507,41 +550,46 @@ function updateAnalyticsAndValidation() {
   const sideboardCount = sideboardCardsExpanded().length;
   const commanderTotal = mainCount + state.commanders.length;
   const displayTotal = isCommanderMode() ? commanderTotal : mainCount;
-  const nonlands = mainCards.filter(card => !/Land/i.test(card.type_line || ''));
+  const nonlands = mainCards.filter(card => sectionForCard(card) !== 'land');
   const avg = nonlands.length ? nonlands.reduce((sum, card) => sum + Number(card.cmc || 0), 0) / nonlands.length : 0;
-  const lands = mainCards.filter(card => /Land/i.test(card.type_line || '')).length;
+  const lands = mainCards.filter(card => sectionForCard(card) === 'land').length;
   const identity = [...commanderIdentity()];
 
   elements.totalCount.textContent = displayTotal;
   elements.avgMana.textContent = avg.toFixed(2);
   elements.landCount.textContent = lands;
+  const target = isCommanderMode() ? format.exactTotal : format.mainMin;
+  const progress = Math.min(100, Math.round(displayTotal / target * 100));
+  el('deckProgress').setAttribute('aria-valuenow', String(progress));
+  el('deckProgress').firstElementChild.style.width = `${progress}%`;
+  el('deckProgressLabel').textContent = t('{count} / {target}장 · {percent}%', { count: displayTotal, target, percent: progress });
   elements.deckIdentity.textContent = isCommanderMode()
-    ? `색 정체성: ${identity.length ? identity.map(c => COLOR_NAMES[c]).join('·') : (state.commanders.length ? '무색' : '미지정')}`
-    : `${format.label} · 사이드보드 ${sideboardCount}/${format.sideboardMax}`;
+    ? t("색 정체성: {p0}", { p0: identity.length ? identity.map(c => t(COLOR_NAMES[c])).join(' · ') : (state.commanders.length ? t("무색") : t("미지정")) })
+    : t("{p0} · 사이드보드 {p1}/{p2}", { p0: format.label, p1: sideboardCount, p2: format.sideboardMax });
 
   const validation = validateDeck();
   const isValid = validation.errors.length === 0;
   elements.validityBadge.className = `status-badge ${isValid ? 'good' : (validation.errors.length ? 'bad' : 'neutral')}`;
-  elements.validityBadge.textContent = isValid ? '규칙 통과' : validation.errors.length ? '수정 필요' : '작성 중';
+  elements.validityBadge.textContent = isValid ? t("규칙 통과") : validation.errors.length ? t("수정 필요") : t("작성 중");
 
   if (isCommanderMode()) {
     elements.validationSummary.innerHTML = `
-      <div><strong>${commanderTotal}</strong><span>전체 카드</span></div>
-      <div><strong>${state.commanders.length}</strong><span>커맨더</span></div>
-      <div><strong>${format.exactTotal - commanderTotal}</strong><span>남은 장수</span></div>`;
+      <div><strong>${commanderTotal}</strong><span>${t("전체 카드")}</span></div>
+      <div><strong>${state.commanders.length}</strong><span>${t("커맨더")}</span></div>
+      <div><strong>${format.exactTotal - commanderTotal}</strong><span>${t("남은 장수")}</span></div>`;
   } else {
     elements.validationSummary.innerHTML = `
-      <div><strong>${mainCount}</strong><span>메인 덱</span></div>
-      <div><strong>${sideboardCount}</strong><span>사이드보드</span></div>
-      <div><strong>${Math.max(0, format.mainMin - mainCount)}</strong><span>메인 부족</span></div>`;
+      <div><strong>${mainCount}</strong><span>${t("메인 덱")}</span></div>
+      <div><strong>${sideboardCount}</strong><span>${t("사이드보드")}</span></div>
+      <div><strong>${Math.max(0, format.mainMin - mainCount)}</strong><span>${t("메인 부족")}</span></div>`;
   }
 
   const issues = [
-    ...(isValid ? [{ type: 'ok', text: `${format.label} 기본 덱 구성 검사를 통과했습니다.` }] : []),
+    ...(isValid ? [{ type: 'ok', text: t("{p0} 기본 덱 구성 검사를 통과했습니다.", { p0: format.label }) }] : []),
     ...validation.errors.map(text => ({ type: 'error', text })),
     ...validation.warnings.map(text => ({ type: 'warning', text }))
   ];
-  if (!issues.length) issues.push({ type: 'warning', text: '카드를 추가하면 장수·복사 제한·포맷 합법성을 검사합니다.' });
+  if (!issues.length) issues.push({ type: 'warning', text: t("카드를 추가하면 장수·복사 제한·포맷 합법성을 검사합니다.") });
   elements.validationIssues.innerHTML = issues.slice(0, 16).map(issue => `<li class="${issue.type}">${escapeHtml(issue.text)}</li>`).join('');
 
   renderManaCurve(mainCards);
@@ -550,7 +598,7 @@ function updateAnalyticsAndValidation() {
 
 function renderManaCurve(cards) {
   const counts = Array(8).fill(0);
-  cards.filter(card => !/Land/i.test(card.type_line || '')).forEach(card => {
+  cards.filter(card => sectionForCard(card) !== 'land').forEach(card => {
     const cmc = Math.max(0, Math.floor(Number(card.cmc || 0)));
     counts[Math.min(7, cmc)] += 1;
   });
@@ -560,11 +608,11 @@ function renderManaCurve(cards) {
   `).join('');
 }
 function renderTypeBreakdown() {
-  const values = SECTION_DEFS.map(([id, name]) => ({ name, count: totalEntryQty(state.sections[id]) })).filter(item => item.count > 0);
+  const values = SECTION_DEFS.map(([id, name]) => ({ name: t(name), count: totalEntryQty(state.sections[id]) })).filter(item => item.count > 0);
   const max = Math.max(1, ...values.map(item => item.count));
   elements.typeBreakdown.innerHTML = values.map(item => `
     <div class="type-row"><span>${item.name}</span><div class="type-track"><div class="type-fill" style="width:${item.count / max * 100}%"></div></div><strong>${item.count}</strong></div>
-  `).join('') || '<div class="type-row"><span>카드 없음</span><div class="type-track"></div><strong>0</strong></div>';
+  `).join('') || `<div class="type-row"><span>${t("카드 없음")}</span><div class="type-track"></div><strong>0</strong></div>`;
 }
 
 function sleep(ms) {
@@ -581,11 +629,11 @@ async function fetchJson(url, options = {}, timeoutMs = 30_000) {
       signal: options.signal || controller.signal,
       headers: { 'Accept': 'application/json;q=0.9,*/*;q=0.8', ...(options.headers || {}) }
     });
-    const payload = await response.json().catch(() => ({ details: '응답을 읽지 못했습니다.' }));
+    const payload = await response.json().catch(() => ({ details: t("응답을 읽지 못했습니다.") }));
     if (!response.ok) throw new Error(payload.details || `HTTP ${response.status}`);
     return payload;
   } catch (error) {
-    if (error.name === 'AbortError') throw new Error('요청 시간이 초과되었습니다.');
+    if (error.name === 'AbortError') throw new Error(t("요청 시간이 초과되었습니다."));
     throw error;
   } finally {
     clearTimeout(timer);
@@ -608,17 +656,18 @@ function queuedScryfallJson(path, options = {}, timeoutMs = 30_000) {
           headers: { 'Accept': 'application/json;q=0.9,*/*;q=0.8', ...(options.headers || {}) }
         });
         clearTimeout(timer);
-        const payload = await response.json().catch(() => ({ details: 'Scryfall 응답을 읽지 못했습니다.' }));
+        const payload = await response.json().catch(() => ({ details: t("Scryfall 응답을 읽지 못했습니다.") }));
         if ((response.status === 429 || response.status >= 500) && attempt < 2) {
           const retryAfter = Number(response.headers.get('retry-after'));
           await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 600 * (2 ** attempt));
           continue;
         }
-        if (!response.ok) throw new Error(payload.details || `Scryfall HTTP ${response.status}`);
+        if (!response.ok) { const error = new Error(payload.details || `Scryfall HTTP ${response.status}`); error.status = response.status; throw error; }
         return payload;
       } catch (error) {
         lastError = error;
-        if (attempt >= 2) throw error.name === 'AbortError' ? new Error('Scryfall 요청 시간이 초과되었습니다.') : error;
+        if (error.status && error.status < 500 && error.status !== 429) throw error;
+        if (attempt >= 2) throw error.name === 'AbortError' ? new Error(t("Scryfall 요청 시간이 초과되었습니다.")) : error;
         await sleep(600 * (2 ** attempt));
       }
     }
@@ -660,28 +709,22 @@ async function idbPut(key, value) {
       transaction.objectStore(LOCAL_DB_STORE).put(value, key);
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error || new Error('브라우저 DB 저장이 중단되었습니다.'));
+      transaction.onabort = () => reject(transaction.error || new Error(t("브라우저 DB 저장이 중단되었습니다.")));
     });
   } finally { db.close(); }
 }
 
-function normalizeText(value = '') {
-  return String(value).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('en-US');
-}
-
 function indexLocalCards(cards) {
   localCards = Array.isArray(cards) ? cards : [];
-  localByName = new Map();
+  localByName = createCardNameIndex(localCards);
   localById = new Map();
   for (const card of localCards) {
     const facesText = (card.card_faces || []).map(face => `${face.name || ''} ${face.type_line || ''} ${face.oracle_text || ''}`).join(' ');
     card._name = normalizeText(card.name);
-    card._type = normalizeText(card.type_line);
+    card._type = normalizeText(card.type_line || (card.card_faces || []).map(face => face.type_line || '').join(' // '));
     card._oracle = normalizeText(`${card.oracle_text || ''} ${facesText}`);
     card._set = normalizeText(`${card.set || ''} ${card.set_name || ''}`);
     localById.set(card.id, card);
-    localByName.set(card._name, card);
-    for (const face of card.card_faces || []) if (face.name) localByName.set(normalizeText(face.name), card);
   }
 }
 
@@ -699,7 +742,7 @@ function localConfig() {
 function formatDbDate(value) {
   if (!value) return '-';
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('ko-KR', { dateStyle: 'medium', timeStyle: 'short' });
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString(locale(), { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 function renderLocalDbStatus() {
@@ -708,18 +751,18 @@ function renderLocalDbStatus() {
   elements.localDbStrip.classList.toggle('updating', db.updating);
   elements.localDbDot.className = `status-dot ${db.updating ? 'updating' : db.ready ? 'ready' : 'missing'}`;
   elements.localDbMiniStatus.textContent = db.updating
-    ? '브라우저 카드 DB 업데이트 중'
+    ? t("브라우저 카드 DB 업데이트 중")
     : db.ready
-      ? `브라우저 DB ${Number(db.cardCount || 0).toLocaleString('ko-KR')}장`
-      : '브라우저 카드 DB 미설치';
-  elements.localDbStatusText.textContent = db.updating ? '업데이트 중' : db.ready ? '사용 가능' : '설치 필요';
-  elements.localDbCardCount.textContent = db.ready ? `${Number(db.cardCount || 0).toLocaleString('ko-KR')}장` : '-';
+      ? t("브라우저 DB {p0}장", { p0: Number(db.cardCount || 0).toLocaleString(locale()) })
+      : t("브라우저 카드 DB 미설치");
+  elements.localDbStatusText.textContent = db.updating ? t("업데이트 중") : db.ready ? t("사용 가능") : t("설치 필요");
+  elements.localDbCardCount.textContent = db.ready ? t("{p0}장", { p0: Number(db.cardCount || 0).toLocaleString(locale()) }) : '-';
   elements.localDbBuiltAt.textContent = formatDbDate(db.builtAt);
   elements.localDbSourceAt.textContent = formatDbDate(db.sourceUpdatedAt);
   elements.localDbAutoUpdate.checked = Boolean(db.autoUpdate);
   elements.localDbAutoDays.value = String(db.autoUpdateDays || 1);
   elements.updateLocalDbBtn.disabled = Boolean(db.updating);
-  elements.updateLocalDbBtn.textContent = db.updating ? '업데이트 중…' : db.ready ? '지금 업데이트' : '브라우저 DB 설치';
+  elements.updateLocalDbBtn.textContent = db.updating ? t("업데이트 중…") : db.ready ? t("지금 업데이트") : t("브라우저 DB 설치");
 }
 
 async function readPublishedDbMeta() {
@@ -751,9 +794,9 @@ async function refreshLocalDbStatus() {
 }
 
 async function decodeCompressedCards(response) {
-  if (!response.ok) throw new Error(`카드 DB 다운로드 HTTP ${response.status}`);
+  if (!response.ok) throw new Error(t("카드 DB 다운로드 HTTP {p0}", { p0: response.status }));
   if (!('DecompressionStream' in window)) {
-    throw new Error('이 브라우저는 압축 DB 해제를 지원하지 않습니다. 최신 Chrome, Edge, Firefox 또는 Safari를 사용해주세요.');
+    throw new Error(t("이 브라우저는 압축 DB 해제를 지원하지 않습니다. 최신 Chrome, Edge, Firefox 또는 Safari를 사용해주세요."));
   }
   const stream = response.body.pipeThrough(new DecompressionStream('gzip'));
   return new Response(stream).json();
@@ -764,7 +807,7 @@ async function installLocalDatabase(force = false) {
   renderLocalDbStatus();
   try {
     const published = await readPublishedDbMeta();
-    if (!published.ready || !published.version) throw new Error('배포된 카드 DB가 아직 생성되지 않았습니다. GitHub Actions 배포 완료 후 다시 시도해주세요.');
+    if (!published.ready || !published.version) throw new Error(t("배포된 카드 DB가 아직 생성되지 않았습니다. GitHub Actions 배포 완료 후 다시 시도해주세요."));
     if (!force && state.localDb.ready && state.localDb.version === published.version) {
       const meta = { ...(await idbGet('meta')), checkedAt: new Date().toISOString() };
       await idbPut('meta', meta);
@@ -776,7 +819,7 @@ async function installLocalDatabase(force = false) {
     dbUrl.searchParams.set('v', published.version);
     const response = await fetch(dbUrl.href, { cache: 'no-store' });
     const cards = await decodeCompressedCards(response);
-    if (!Array.isArray(cards) || cards.length < 1) throw new Error('다운로드한 카드 DB가 비어 있습니다.');
+    if (!Array.isArray(cards) || cards.length < 1) throw new Error(t("다운로드한 카드 DB가 비어 있습니다."));
     const installedMeta = { ...published, installedAt: new Date().toISOString(), checkedAt: new Date().toISOString() };
     await idbPut('cards', cards);
     await idbPut('meta', installedMeta);
@@ -835,7 +878,10 @@ function tokenPredicate(rawToken) {
   const rawValue = colon >= 0 ? token.slice(colon + 1) : token;
   const value = normalizeText(rawValue.replace(/^"|"$/g, ''));
   let predicate;
-  if (!key || key === 'game') predicate = card => card._name.includes(value) || card._type.includes(value) || card._oracle.includes(value);
+  const numeric = token.match(/^(?:mv|cmc)([<>=].+)$/i);
+  if (numeric) predicate = card => compareNumber(Number(card.cmc || 0), numeric[1]);
+  else if (key === 'game') predicate = () => true;
+  else if (!key) predicate = card => card._name.includes(value) || card._type.includes(value) || card._oracle.includes(value);
   else if (['t', 'type'].includes(key)) predicate = card => card._type.includes(value);
   else if (['o', 'oracle'].includes(key)) predicate = card => card._oracle.includes(value);
   else if (['n', 'name'].includes(key)) predicate = card => card._name.includes(value);
@@ -853,13 +899,13 @@ function tokenPredicate(rawToken) {
   else predicate = card => card._name.includes(value) || card._type.includes(value) || card._oracle.includes(value);
   return card => negated ? !predicate(card) : predicate(card);
 }
-function searchLocalCards(query, page = 1, pageSize = 60) {
-  if (!localCards.length) throw new Error('브라우저 카드 DB가 설치되지 않았습니다.');
+function searchLocalCards(query, page = 1, pageSize = 60, filters = state.filters, sort = state.searchOrder) {
+  if (!localCards.length) throw new Error(t("브라우저 카드 DB가 설치되지 않았습니다."));
   const tokens = tokenizeQuery(query).filter(token => !/^\b(and|or)\b$/i.test(token));
   const predicates = tokens.map(tokenPredicate);
-  let results = localCards.filter(card => predicates.every(predicate => predicate(card)));
+  let results = localCards.filter(card => predicates.every(predicate => predicate(card)) && matchesVisualFilters(card, filters));
   const orderToken = tokens.find(token => /^order:/i.test(token));
-  const order = normalizeText(orderToken?.split(':').slice(1).join(':') || 'name');
+  const order = normalizeText(orderToken?.split(':').slice(1).join(':') || sort);
   if (order === 'edhrec') results.sort((a, b) => (a.edhrec_rank ?? Number.MAX_SAFE_INTEGER) - (b.edhrec_rank ?? Number.MAX_SAFE_INTEGER) || a.name.localeCompare(b.name));
   else if (order === 'cmc' || order === 'mv') results.sort((a, b) => Number(a.cmc || 0) - Number(b.cmc || 0) || a.name.localeCompare(b.name));
   else if (order === 'released') results.sort((a, b) => String(b.released_at || '').localeCompare(String(a.released_at || '')));
@@ -892,71 +938,105 @@ function localSearchSupported(raw) {
 }
 function shouldUseLocal(raw = '') {
   if (state.searchSource === 'online') return false;
-  if (state.searchSource === 'local') return true;
+  if (state.searchSource === 'local') {
+    if (!localSearchSupported(raw)) throw new Error(t('이 검색식 또는 인쇄 언어는 온라인 검색을 사용해주세요. 버튼 필터는 로컬에서도 지원합니다.'));
+    return true;
+  }
   return state.localDb.ready && localSearchSupported(raw);
 }
-async function fetchSearchData(q, page, raw) {
+async function fetchSearchData(q, page, raw, filters, sort) {
+  const localQuery = buildSearchQuery(raw, false);
   if (shouldUseLocal(raw)) {
-    try {
-      const data = searchLocalCards(q, page);
-      state.lastSearchSource = 'local';
-      return data;
-    } catch (error) { if (state.searchSource === 'local') throw error; }
+    try { return { ...searchLocalCards(localQuery, page, 60, filters, sort), source: 'local' }; }
+    catch (error) { if (state.searchSource === 'local') throw error; }
   }
   try {
-    const params = new URLSearchParams({ q, page: String(page), unique: 'cards', order: isCommanderMode() ? 'edhrec' : 'name' });
+    const params = new URLSearchParams({ q, page: String(page), unique: 'cards', order: sort });
     const data = await queuedScryfallJson(`/cards/search?${params}`);
-    state.lastSearchSource = 'online';
-    return data;
+    return { ...data, source: 'online' };
   } catch (error) {
-    if (state.searchSource !== 'auto' || !state.localDb.ready) throw error;
-    const fallbackQuery = q.replace(/\s*lang:[^\s)]+/gi, '');
-    const data = searchLocalCards(fallbackQuery, page);
-    state.lastSearchSource = 'local-fallback';
-    return data;
+    if (error.status === 404) return { data: [], total_cards: 0, has_more: false, source: 'online' };
+    if (state.searchSource !== 'auto' || !state.localDb.ready || !localSearchSupported(raw)) throw error;
+    return { ...searchLocalCards(localQuery, page, 60, filters, sort), source: 'local-fallback' };
   }
 }
 
-function buildSearchQuery(raw) {
+function buildSearchQuery(raw, visual = true) {
   const parts = [];
-  if (raw.trim()) parts.push(`(${raw.trim()})`);
-  if (elements.legalOnly.checked && !/legal:/i.test(raw)) parts.push(`legal:${currentFormat().legality}`);
+  if (raw.trim()) {
+    const term = raw.trim();
+    const advanced = /[:=<>!"{}()]/.test(term) || /(?:^|\s)(?:or|and|not)(?:\s|$)/i.test(term);
+    parts.push(advanced ? `(${term})` : `name:"${term.replace(/\\/g, '\\\\')}"`);
+  }
+  if (elements.legalOnly.checked && !/\b(?:legal|f):/i.test(raw)) parts.push(`legal:${currentFormat().legality}`);
   const lang = elements.languageFilter.value;
-  if (lang && !/lang:/i.test(raw)) parts.push(`lang:${lang}`);
-  if (parts.length) return parts.join(' ');
-  return isCommanderMode() ? 't:legendary t:creature legal:commander' : `legal:${currentFormat().legality}`;
+  if (lang && !/\blang:/i.test(raw)) parts.push(`lang:${lang}`);
+  if (visual) {
+    const filters = visualFilterQuery(state.filters);
+    if (filters) parts.push(filters);
+  }
+  return parts.join(' ') || 'mv>=0';
 }
 
+let searchSequence = 0;
 async function searchCards(raw = state.query, page = 1) {
+  const sequence = ++searchSequence;
+  clearTimeout(suggestTimer);
+  ++suggestSequence;
+  elements.suggestions.classList.add('hidden');
   state.query = raw;
   state.page = page;
+  state.loading = true;
+  state.searchError = null;
   elements.searchEmpty.classList.add('hidden');
+  elements.searchResults.setAttribute('aria-busy', 'true');
   elements.searchResults.innerHTML = '<div class="loading-grid">' + '<div class="skeleton"></div>'.repeat(6) + '</div>';
   elements.pagination.classList.add('hidden');
+  elements.resultCount.textContent = t('카드를 찾는 중…');
   try {
     const q = buildSearchQuery(raw);
-    const data = await fetchSearchData(q, page, raw);
+    const data = await fetchSearchData(q, page, raw, structuredClone(state.filters), state.searchOrder);
+    if (sequence !== searchSequence) return;
     state.searchResults = data.data || [];
     state.searchMap = new Map(state.searchResults.map(card => [card.id, card]));
     state.totalCards = data.total_cards || state.searchResults.length;
     state.hasMore = Boolean(data.has_more);
-    renderSearchResults();
-    elements.resultCount.textContent = `${state.totalCards.toLocaleString('ko-KR')}장 · ${state.lastSearchSource === 'online' ? 'Scryfall 온라인' : state.lastSearchSource === 'local-fallback' ? '브라우저 DB 폴백' : '브라우저 DB'}`;
-    elements.pageLabel.textContent = `${page}페이지`;
-    elements.prevPageBtn.disabled = page <= 1;
-    elements.nextPageBtn.disabled = !state.hasMore;
-    elements.pagination.classList.toggle('hidden', !state.searchResults.length);
+    state.lastSearchSource = data.source;
   } catch (error) {
+    if (sequence !== searchSequence) return;
     state.searchResults = [];
-    elements.searchResults.innerHTML = '';
-    elements.searchEmpty.classList.remove('hidden');
-    elements.searchEmpty.querySelector('h3').textContent = '검색 결과가 없습니다';
-    elements.searchEmpty.querySelector('p').textContent = error.message;
-    elements.resultCount.textContent = '0장 검색됨';
+    state.searchMap.clear();
+    state.totalCards = 0;
+    state.hasMore = false;
+    state.searchError = error.message;
+  }
+  if (sequence !== searchSequence) return;
+  state.loading = false;
+  elements.searchResults.setAttribute('aria-busy', 'false');
+  renderSearchResults();
+  renderSearchMeta();
+}
+
+function renderSearchMeta() {
+  if (state.loading) { elements.resultCount.textContent = t('카드를 찾는 중…'); return; }
+  elements.resultCount.textContent = t('{count}장', { count: state.totalCards.toLocaleString(locale()) });
+  elements.resultCount.title = state.lastSearchSource === 'online' ? 'Scryfall' : t('브라우저 DB');
+  elements.pageLabel.textContent = t('{page}페이지', { page: state.page });
+  elements.prevPageBtn.disabled = state.page <= 1;
+  elements.nextPageBtn.disabled = !state.hasMore;
+  elements.pagination.classList.toggle('hidden', !state.searchResults.length);
+  if (!state.searchResults.length) {
+    elements.searchEmpty.querySelector('h3').textContent = state.searchError ? t('검색에 연결하지 못했습니다') : t('일치하는 카드가 없습니다');
+    elements.searchEmpty.querySelector('p').textContent = state.searchError || t('필터를 줄이거나 다른 카드 이름으로 검색해보세요.');
   }
 }
 
 function renderSearchResults() {
+  document.querySelectorAll('.view-switch button').forEach(button => {
+    const active = button.dataset.view === state.view;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
   elements.searchResults.className = `card-results ${state.view}-view`;
   elements.searchResults.innerHTML = '';
   if (!state.searchResults.length) return elements.searchEmpty.classList.remove('hidden');
@@ -965,10 +1045,13 @@ function renderSearchResults() {
     const node = document.createElement('article');
     node.className = 'result-card';
     node.draggable = true;
+    node.tabIndex = 0;
+    node.setAttribute('aria-label', cardName(card));
+    node.addEventListener('keydown', event => { if (event.target === node && event.key === 'Enter') showCardDialog(card); });
     node.innerHTML = `
-      <img src="${escapeHtml(cardImage(card, state.view === 'grid' ? 'normal' : 'small'))}" alt="${escapeHtml(cardName(card))}" loading="lazy">
-      <div class="result-info"><strong>${escapeHtml(cardName(card))}</strong><span>${escapeHtml(card.type_line || '')}</span></div>
-      <button class="result-add" title="덱에 추가">+</button>
+      ${state.view === 'grid' ? `<img src="${escapeHtml(cardImage(card, 'normal'))}" alt="${escapeHtml(cardName(card))}" loading="lazy">` : ''}
+      <div class="result-info"><strong>${escapeHtml(cardName(card))}</strong><span>${escapeHtml(card.type_line || '')}</span>${state.view === 'list' ? `<span class="result-mana">${escapeHtml(cardMana(card)) || '—'}</span>` : ''}</div>
+      <button class="result-add" title="${t('덱에 추가')}" aria-label="${escapeHtml(t('{name} 덱에 추가', { name: cardName(card) }))}">+</button>
       ${isCommanderCandidate(card) ? '<span class="result-badge">CMD</span>' : ''}
     `;
     node.addEventListener('dragstart', event => setDragData(event, { source: 'search', cardId: card.id }));
@@ -980,7 +1063,8 @@ function renderSearchResults() {
 }
 
 function showCardDialog(card) {
-  const price = card.prices?.usd ? `$${card.prices.usd}` : card.prices?.eur ? `€${card.prices.eur}` : '정보 없음';
+  const price = card.prices?.usd ? `$${card.prices.usd}` : card.prices?.eur ? `€${card.prices.eur}` : t("정보 없음");
+  state.detailCard = card;
   elements.cardDialogContent.innerHTML = `
     <div class="card-detail">
       <div class="card-detail-image"><img src="${escapeHtml(cardImage(card, 'large') || cardImage(card))}" alt="${escapeHtml(cardName(card))}"></div>
@@ -991,25 +1075,25 @@ function showCardDialog(card) {
         <p class="card-type">${escapeHtml(card.type_line || '')}</p>
         <div class="card-oracle">${renderMana(cardOracle(card))}</div>
         <div class="card-meta-grid">
-          <div><span>세트 / 번호</span><strong>${escapeHtml((card.set || '').toUpperCase())} #${escapeHtml(card.collector_number || '-')}</strong></div>
-          <div><span>희귀도</span><strong>${escapeHtml(card.rarity || '-')}</strong></div>
-          <div><span>아티스트</span><strong>${escapeHtml(card.artist || '-')}</strong></div>
-          <div><span>시장가 참고</span><strong>${escapeHtml(price)}</strong></div>
-          <div><span>EDHREC 순위</span><strong>${card.edhrec_rank ? card.edhrec_rank.toLocaleString('ko-KR') : '-'}</strong></div>
-          <div><span>${escapeHtml(currentFormat().label)} 합법성</span><strong>${escapeHtml(legalityStatus(card, state.format))}</strong></div>
+          <div><span>${t("세트 / 번호")}</span><strong>${escapeHtml((card.set || '').toUpperCase())} #${escapeHtml(card.collector_number || '-')}</strong></div>
+          <div><span>${t("희귀도")}</span><strong>${escapeHtml(card.rarity || '-')}</strong></div>
+          <div><span>${t("아티스트")}</span><strong>${escapeHtml(card.artist || '-')}</strong></div>
+          <div><span>${t("시장가 참고")}</span><strong>${escapeHtml(price)}</strong></div>
+          <div><span>${t("EDHREC 순위")}</span><strong>${card.edhrec_rank ? card.edhrec_rank.toLocaleString(locale()) : '-'}</strong></div>
+          <div><span>${escapeHtml(currentFormat().label)} ${t("합법성")}</span><strong>${escapeHtml(legalityStatus(card, state.format))}</strong></div>
         </div>
         <div class="detail-actions">
-          <button class="btn primary" id="detailAddBtn">메인 덱에 추가</button>
-          ${!isCommanderMode() ? '<button class="btn ghost" id="detailSideboardBtn">사이드보드에 추가</button>' : ''}
-          ${isCommanderMode() && isCommanderCandidate(card) ? '<button class="btn ghost" id="detailCommanderBtn">커맨더로 지정</button>' : ''}
-          <a class="btn ghost" href="${escapeHtml(card.scryfall_uri || '#')}" target="_blank" rel="noreferrer">Scryfall에서 보기</a>
+          <button class="btn primary" id="detailAddBtn">${t("메인 덱에 추가")}</button>
+          ${!isCommanderMode() ? `<button class="btn ghost" id="detailSideboardBtn">${t("사이드보드에 추가")}</button>` : ''}
+          ${isCommanderMode() && isCommanderCandidate(card) ? `<button class="btn ghost" id="detailCommanderBtn">${t("커맨더로 지정")}</button>` : ''}
+          <a class="btn ghost" href="${escapeHtml(card.scryfall_uri || '#')}" target="_blank" rel="noreferrer">${t("Scryfall에서 보기")}</a>
         </div>
       </div>
     </div>`;
   el('detailAddBtn').addEventListener('click', () => { addCard(card); elements.cardDialog.close(); });
   el('detailSideboardBtn')?.addEventListener('click', () => { addCard(card, 'sideboard'); elements.cardDialog.close(); });
   el('detailCommanderBtn')?.addEventListener('click', () => { addCard(card, 'commander'); elements.cardDialog.close(); });
-  elements.cardDialog.showModal();
+  if (!elements.cardDialog.open) elements.cardDialog.showModal();
 }
 
 async function loadSymbols() {
@@ -1020,8 +1104,10 @@ async function loadSymbols() {
 }
 
 let suggestTimer;
+let suggestSequence = 0;
 async function updateSuggestions() {
   clearTimeout(suggestTimer);
+  const sequence = ++suggestSequence;
   const q = elements.searchInput.value.trim();
   if (q.length < 2 || /[:=<>]/.test(q)) return elements.suggestions.classList.add('hidden');
   suggestTimer = setTimeout(async () => {
@@ -1032,6 +1118,7 @@ async function updateSuggestions() {
         catch (error) { if (state.searchSource === 'local') throw error; }
       }
       if (!data) data = await queuedScryfallJson(`/cards/autocomplete?q=${encodeURIComponent(q)}`);
+      if (sequence !== suggestSequence || q !== elements.searchInput.value.trim()) return;
       const names = (data.data || []).slice(0, 7);
       elements.suggestions.innerHTML = names.map(name => `<button type="button">${escapeHtml(name)}</button>`).join('');
       elements.suggestions.classList.toggle('hidden', !names.length);
@@ -1097,7 +1184,7 @@ function exportDeckText(format = state.exportFormat) {
   lines.push('Main Deck');
   for (const [id, name] of SECTION_DEFS) {
     if (!state.sections[id].length) continue;
-    lines.push(name);
+    lines.push(t(name));
     state.sections[id].forEach(entry => lines.push(exportLine(entry)));
     lines.push('');
   }
@@ -1110,9 +1197,9 @@ function exportDeckText(format = state.exportFormat) {
 
 function exportFormatHelp(format) {
   const zones = isCommanderMode() ? 'Commander/Deck' : 'Deck/Sideboard';
-  if (format === 'arena') return `MTG Arena의 ${zones} 구역 형식입니다. Arena에 없는 카드나 세트는 가져오지 못할 수 있습니다.`;
-  if (format === 'moxfield') return `Moxfield용 인쇄본 형식입니다. ${isCommanderMode() ? '커맨더에는 *CMDR* 표식을 붙입니다.' : '사이드보드는 SIDEBOARD 구역으로 분리합니다.'}`;
-  return '포맷, 메인 덱, 커맨더 또는 사이드보드 구역을 포함한 읽기 쉬운 일반 텍스트 형식입니다.';
+  if (format === 'arena') return t("MTG Arena의 {p0} 구역 형식입니다. Arena에 없는 카드나 세트는 가져오지 못할 수 있습니다.", { p0: zones });
+  if (format === 'moxfield') return t("Moxfield용 인쇄본 형식입니다. {p0}", { p0: isCommanderMode() ? t("커맨더에는 *CMDR* 표식을 붙입니다.") : t("사이드보드는 SIDEBOARD 구역으로 분리합니다.") });
+  return t("포맷, 메인 덱, 커맨더 또는 사이드보드 구역을 포함한 읽기 쉬운 일반 텍스트 형식입니다.");
 }
 
 function refreshExportText() {
@@ -1121,38 +1208,42 @@ function refreshExportText() {
   elements.deckTextArea.value = exportDeckText(state.exportFormat);
 }
 
-function safeDeckFilename() {
+function safeDeckFilename(format = state.exportFormat) {
   const base = (state.deckName || `${currentFormat().label}-deck`)
     .replace(/[\/:*?"<>|]+/g, '-')
     .replace(/\s+/g, ' ')
     .trim() || 'mtg-deck';
-  return `${base}-${state.exportFormat}.txt`;
+  return `${base}-${format}.txt`;
 }
 
-function downloadDeckText() {
-  const blob = new Blob([elements.deckTextArea.value], { type: 'text/plain;charset=utf-8' });
+function saveDeckTextFile(text, format) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = safeDeckFilename();
+  anchor.download = safeDeckFilename(format);
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
-  toast('덱 목록 TXT 파일을 저장했습니다.', 'success');
+  toast(t("덱 목록 TXT 파일을 저장했습니다."), 'success');
+}
+
+function downloadDeckText() {
+  saveDeckTextFile(elements.deckTextArea.value, state.exportFormat);
 }
 
 function openTextDialog(mode) {
   state.importMode = mode === 'import';
   elements.textDialogEyebrow.textContent = mode === 'import' ? 'IMPORT DECK' : 'EXPORT DECK';
-  elements.textDialogTitle.textContent = mode === 'import' ? '덱 목록 가져오기' : '덱 목록 내보내기';
+  elements.textDialogTitle.textContent = mode === 'import' ? t("덱 목록 가져오기") : t("덱 목록 내보내기");
   elements.exportFormatRow.classList.toggle('hidden', state.importMode);
   elements.downloadDeckTextBtn.classList.toggle('hidden', state.importMode);
   elements.deckTextArea.readOnly = !state.importMode;
-  elements.textDialogConfirm.textContent = state.importMode ? '가져오기' : '클립보드에 복사';
+  elements.textDialogConfirm.textContent = state.importMode ? t("가져오기") : t("클립보드에 복사");
 
   if (state.importMode) {
-    elements.textDialogHelp.textContent = 'Arena/Moxfield의 Commander, Deck, Sideboard 헤더와 *CMDR* 표식을 인식합니다. 커맨더 표식이 없고 현재 포맷이 Commander라면 Standard로 전환하므로, 가져온 뒤 원하는 포맷을 선택하세요.';
+    elements.textDialogHelp.textContent = t("Arena/Moxfield의 Commander, Deck, Sideboard 헤더와 *CMDR* 표식을 인식합니다. 커맨더 표식이 없고 현재 포맷이 Commander라면 Standard로 전환하므로, 가져온 뒤 원하는 포맷을 선택하세요.");
     elements.deckTextArea.value = '';
   } else {
     elements.exportFormat.value = state.exportFormat;
@@ -1211,9 +1302,9 @@ async function fetchCollectionBatches(identifiers) {
 
 async function importDeck(text) {
   const parsed = parseDeckList(text);
-  if (!parsed.items.length) throw new Error('가져올 카드 목록이 없습니다.');
+  if (!parsed.items.length) throw new Error(t("가져올 카드 목록이 없습니다."));
   const unique = [...new Map(parsed.items.map(item => [item.name.toLowerCase(), item])).values()];
-  if (unique.length > 250) throw new Error('한 번에 가져올 수 있는 서로 다른 카드 이름은 250개까지입니다.');
+  if (unique.length > 250) throw new Error(t("한 번에 가져올 수 있는 서로 다른 카드 이름은 250개까지입니다."));
   const identifiers = unique.map(item => ({ name: item.name }));
   let data;
   if (state.localDb.ready && state.searchSource !== 'online') {
@@ -1249,12 +1340,13 @@ async function importDeck(text) {
     throw error;
   }
   renderDeck();
-  toast(`덱을 가져왔습니다${notFound.length ? ` · ${notFound.length}개 이름 미확인` : ''}.`, notFound.length ? '' : 'success');
+  toast(t("덱을 가져왔습니다{p0}.", { p0: notFound.length ? t(" · {p0}개 이름 미확인", { p0: notFound.length }) : '' }), notFound.length ? '' : 'success');
 }
 
 function resetDeck() {
   const format = currentFormat();
-  state.deckName = `새 ${format.labelKo || format.label} 덱`;
+  state.defaultDeckName = true;
+  state.deckName = t('새 {format} 덱', { format: getLanguage() === 'ko' ? (format.labelKo || format.label) : format.label });
   state.commanders = [];
   state.sideboard = [];
   state.sections = Object.fromEntries(SECTION_DEFS.map(([id]) => [id, []]));
@@ -1262,11 +1354,12 @@ function resetDeck() {
 }
 
 function autoSortDeck() {
+  regroupMainDeck();
   for (const [id] of SECTION_DEFS) {
     state.sections[id].sort((a, b) => Number(a.card.cmc || 0) - Number(b.card.cmc || 0) || cardName(a.card).localeCompare(cardName(b.card)));
   }
   state.sideboard.sort((a, b) => cardName(a.card).localeCompare(cardName(b.card)));
-  markDirty(); renderDeck(); toast('메인 덱은 마나 값·이름, 사이드보드는 이름 순으로 정렬했습니다.', 'success');
+  markDirty(); renderDeck(); toast(t("메인 덱은 마나 값·이름, 사이드보드는 이름 순으로 정렬했습니다."), 'success');
 }
 
 function bindEvents() {
@@ -1280,25 +1373,32 @@ function bindEvents() {
     localStorage.setItem(SEARCH_SOURCE_KEY, state.searchSource);
     searchCards(state.query, 1);
   });
-  el('quickFilters').addEventListener('click', event => {
-    const button = event.target.closest('[data-query]'); if (!button) return;
-    const query = button.dataset.query;
-    if (query === 'order:edhrec') { elements.searchInput.value = ''; searchCards('', 1); }
-    else { elements.searchInput.value = query; searchCards(query, 1); }
-  });
+  bindVisualFilterEvents();
   elements.prevPageBtn.addEventListener('click', () => searchCards(state.query, Math.max(1, state.page - 1)));
   elements.nextPageBtn.addEventListener('click', () => searchCards(state.query, state.page + 1));
   document.querySelectorAll('.view-switch button').forEach(button => button.addEventListener('click', () => {
     state.view = button.dataset.view;
-    document.querySelectorAll('.view-switch button').forEach(b => b.classList.toggle('active', b === button));
+    try { localStorage.setItem(SEARCH_VIEW_KEY, state.view); } catch { /* View switching still works. */ }
+    document.querySelectorAll('.view-switch button').forEach(b => { b.classList.toggle('active', b === button); b.setAttribute('aria-pressed', String(b === button)); });
     renderSearchResults();
   }));
 
-  elements.deckName.addEventListener('input', () => { state.deckName = elements.deckName.value; markDirty(); });
+  document.querySelectorAll('.deck-view-switch button').forEach(button => button.addEventListener('click', () => setDeckView(button.dataset.deckView)));
+  el('copyDeckListBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(exportDeckText('plain'));
+      toast(t('덱 목록을 복사했습니다.'), 'success');
+    } catch {
+      toast(t('복사하지 못했습니다. TXT 저장을 사용하세요.'), 'error');
+    }
+  });
+  el('downloadPlainDeckBtn').addEventListener('click', () => saveDeckTextFile(exportDeckText('plain'), 'plain'));
+
+  elements.deckName.addEventListener('input', () => { state.deckName = elements.deckName.value; state.defaultDeckName = false; markDirty(); });
   elements.deckFormat.addEventListener('change', () => changeFormat(elements.deckFormat.value));
   el('saveBtn').addEventListener('click', () => persistDeck(true));
-  el('newDeckBtn').addEventListener('click', () => { if (confirm('현재 덱을 비우고 새 덱을 만들까요?')) resetDeck(); });
-  el('clearDeckBtn').addEventListener('click', () => { if (confirm('메인 덱, 커맨더 또는 사이드보드의 모든 카드를 제거할까요?')) resetDeck(); });
+  el('newDeckBtn').addEventListener('click', () => { if (confirm(t("현재 덱을 비우고 새 덱을 만들까요?"))) resetDeck(); });
+  el('clearDeckBtn').addEventListener('click', () => { if (confirm(t("메인 덱, 커맨더 또는 사이드보드의 모든 카드를 제거할까요?"))) resetDeck(); });
   el('sortDeckBtn').addEventListener('click', autoSortDeck);
   el('importBtn').addEventListener('click', () => openTextDialog('import'));
   el('exportBtn').addEventListener('click', () => openTextDialog('export'));
@@ -1310,13 +1410,13 @@ function bindEvents() {
     localStorage.setItem(LOCAL_DB_CONFIG_KEY, JSON.stringify(config));
     state.localDb = { ...state.localDb, ...config };
     renderLocalDbStatus();
-    toast('브라우저 DB 업데이트 설정을 저장했습니다.', 'success');
+    toast(t("브라우저 DB 업데이트 설정을 저장했습니다."), 'success');
   });
   elements.updateLocalDbBtn.addEventListener('click', async () => {
     elements.updateLocalDbBtn.disabled = true;
     try {
       state.localDb = await installLocalDatabase(false);
-      toast(state.localDb.unchanged ? '이미 최신 브라우저 카드 DB를 사용 중입니다.' : `브라우저 카드 DB ${Number(state.localDb.cardCount || 0).toLocaleString('ko-KR')}장을 업데이트했습니다.`, 'success');
+      toast(state.localDb.unchanged ? t("이미 최신 브라우저 카드 DB를 사용 중입니다.") : t("브라우저 카드 DB {p0}장을 업데이트했습니다.", { p0: Number(state.localDb.cardCount || 0).toLocaleString(locale()) }), 'success');
       if (state.searchSource !== 'online') searchCards(state.query, 1);
     } catch (error) {
       await refreshLocalDbStatus();
@@ -1329,7 +1429,7 @@ function bindEvents() {
     event.preventDefault();
     try {
       if (state.importMode) await importDeck(elements.deckTextArea.value);
-      else { await navigator.clipboard.writeText(elements.deckTextArea.value); toast('덱 목록을 복사했습니다.', 'success'); }
+      else { await navigator.clipboard.writeText(elements.deckTextArea.value); toast(t("덱 목록을 복사했습니다."), 'success'); }
       elements.textDialog.close();
     } catch (error) { toast(error.message, 'error'); }
   });
@@ -1338,6 +1438,8 @@ function bindEvents() {
   setupDropZone(elements.commanderZone, 'commander');
   setupDropZone(elements.sideboardZone, 'sideboard');
   setupDropZone(elements.trashZone, 'trash');
+  setupDropZone(document.querySelector('.workspace'), 'main');
+  document.addEventListener('dragend', () => { document.body.classList.remove('dragging-card'); document.querySelectorAll('.drag-over').forEach(node => node.classList.remove('drag-over')); });
   el('collapseSearchBtn').addEventListener('click', () => {
     document.querySelector('.search-panel').classList.toggle('collapsed');
     document.body.classList.toggle('search-collapsed');
@@ -1347,14 +1449,106 @@ function bindEvents() {
   setInterval(() => { if (state.dirty) persistDeck(false); }, 30_000);
 }
 
+function regroupMainDeck() {
+  const entries = allMainEntries();
+  state.sections = Object.fromEntries(SECTION_DEFS.map(([id]) => [id, []]));
+  moveEntriesToMain(entries);
+}
+
+function renderVisualFilters() {
+  const containers = { colors: 'colorFilters', types: 'typeFilters', mana: 'manaFilters', rarities: 'rarityFilters', keywords: 'keywordFilters' };
+  for (const [group, id] of Object.entries(containers)) {
+    el(id).innerHTML = FILTER_OPTIONS[group].map(([value, label, icon]) => {
+      const active = state.filters[group].includes(value);
+      const translated = t(label);
+      return `<button type="button" class="filter-chip ${group === 'colors' ? `mana-color color-${value.toLowerCase()}` : ''} ${active ? 'selected' : ''}" data-filter-group="${group}" data-filter-value="${value}" aria-pressed="${active}" aria-label="${escapeHtml(translated)}" title="${escapeHtml(translated)}">${group === 'colors' ? `<span class="color-symbol" aria-hidden="true">${icon}</span><span class="color-name">${escapeHtml(translated)}</span>` : group === 'mana' ? value : `${icon ? `<span class="filter-icon" aria-hidden="true">${icon}</span>` : ''}<span>${escapeHtml(translated)}</span>`}</button>`;
+    }).join('');
+  }
+  elements.commanderQuickFilter.classList.toggle('selected', state.filters.commander);
+  elements.commanderQuickFilter.setAttribute('aria-pressed', String(state.filters.commander));
+  const selected = Object.entries(FILTER_OPTIONS).flatMap(([group, values]) => values.filter(([value]) => state.filters[group].includes(value)).map(([value, label]) => ({ group, value, label: group === 'mana' ? `MV ${value}` : t(label) })));
+  if (state.filters.commander) selected.unshift({ group: 'commander', value: 'commander', label: t('커맨더 후보') });
+  el('activeFilters').innerHTML = selected.map(item => `<button type="button" data-remove-group="${item.group}" data-remove-value="${item.value}" aria-label="${escapeHtml(t('{label} 필터 제거', { label: item.label }))}">${escapeHtml(item.label)} <span aria-hidden="true">×</span></button>`).join('');
+  el('resetFiltersBtn').disabled = !selected.length;
+  el('searchOrder').value = state.searchOrder;
+  el('uiLanguage').value = getLanguage();
+}
+
+let filterSearchTimer;
+function applyFilterSearch() {
+  renderVisualFilters();
+  elements.suggestions.classList.add('hidden');
+  clearTimeout(filterSearchTimer);
+  filterSearchTimer = setTimeout(() => searchCards(elements.searchInput.value, 1), 160);
+}
+
+function setMobilePanel(panel) {
+  document.body.dataset.mobilePanel = panel;
+  for (const [id, value] of [['libraryTab', 'library'], ['deckTab', 'deck']]) {
+    el(id).classList.toggle('active', value === panel);
+    el(id).setAttribute('aria-pressed', String(value === panel));
+  }
+}
+
+function changeUiLanguage(language) {
+  setLanguage(language);
+  translateDocument();
+  if (state.defaultDeckName) state.deckName = t('새 {format} 덱', { format: getLanguage() === 'ko' ? (currentFormat().labelKo || currentFormat().label) : currentFormat().label });
+  renderVisualFilters();
+  renderDeck();
+  renderLocalDbStatus();
+  if (!state.loading) renderSearchResults();
+  renderSearchMeta();
+  elements.autosaveStatus.textContent = state.dirty ? t('저장되지 않은 변경사항') : t('모든 변경사항 저장됨');
+  if (elements.cardDialog.open && state.detailCard) showCardDialog(state.detailCard);
+  if (elements.textDialog.open) {
+    elements.textDialogTitle.textContent = state.importMode ? t('덱 목록 가져오기') : t('덱 목록 내보내기');
+    elements.textDialogConfirm.textContent = state.importMode ? t('가져오기') : t('클립보드에 복사');
+    if (state.importMode) elements.textDialogHelp.textContent = t('Arena/Moxfield의 Commander, Deck, Sideboard 헤더와 *CMDR* 표식을 인식합니다. 커맨더 표식이 없고 현재 포맷이 Commander라면 Standard로 전환하므로, 가져온 뒤 원하는 포맷을 선택하세요.');
+    else refreshExportText();
+  }
+  elements.toastStack.replaceChildren();
+}
+
+function bindVisualFilterEvents() {
+  el('visualFilters').addEventListener('click', event => {
+    const button = event.target.closest('[data-filter-group]');
+    if (!button) return;
+    const group = button.dataset.filterGroup, value = button.dataset.filterValue;
+    const values = state.filters[group];
+    state.filters[group] = values.includes(value) ? values.filter(item => item !== value) : [...values, value];
+    applyFilterSearch();
+  });
+  el('activeFilters').addEventListener('click', event => {
+    const button = event.target.closest('[data-remove-group]');
+    if (!button) return;
+    const group = button.dataset.removeGroup;
+    if (group === 'commander') state.filters.commander = false;
+    else state.filters[group] = state.filters[group].filter(value => value !== button.dataset.removeValue);
+    applyFilterSearch();
+  });
+  el('resetFiltersBtn').addEventListener('click', () => { state.filters = emptyFilters(); applyFilterSearch(); });
+  elements.commanderQuickFilter.addEventListener('click', () => { state.filters.commander = !state.filters.commander; applyFilterSearch(); });
+  elements.popularQuickFilter.addEventListener('click', () => { state.filters = emptyFilters(); state.searchOrder = 'edhrec'; elements.searchInput.value = ''; applyFilterSearch(); });
+  el('searchOrder').addEventListener('change', event => { state.searchOrder = event.target.value; searchCards(elements.searchInput.value, 1); });
+  el('uiLanguage').addEventListener('change', event => changeUiLanguage(event.target.value));
+  el('libraryTab').addEventListener('click', () => setMobilePanel('library'));
+  el('deckTab').addEventListener('click', () => setMobilePanel('deck'));
+}
+
 async function init() {
   createSections();
   loadSavedDeck();
+  regroupMainDeck();
   bindEvents();
+  translateDocument();
+  renderVisualFilters();
   renderDeck();
   await refreshLocalDbStatus();
   maybeAutoUpdateLocalDb();
-  const initialQuery = isCommanderMode() ? 't:legendary t:creature' : '';
+  const initialQuery = '';
+  state.filters.commander = false;
+  renderVisualFilters();
   await Promise.all([loadSymbols(), searchCards(initialQuery, 1)]);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
 }

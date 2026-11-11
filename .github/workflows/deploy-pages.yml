@@ -1,4 +1,4 @@
-name: Deploy Commander Canvas to GitHub Pages
+name: Deploy Deck Canvas to GitHub Pages
 
 on:
   push:

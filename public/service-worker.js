@@ -1,7 +1,7 @@
-const SHELL_CACHE = 'deck-canvas-shell-pages-v2';
+const SHELL_CACHE = 'deck-canvas-shell-pages-v4-2-release';
 const IMAGE_CACHE = 'deck-canvas-card-images-v3';
 const DATA_CACHE = 'deck-canvas-published-db-v2';
-const SHELL_FILES = ['./', './index.html', './styles.css', './app.js', './deck-rules.js', './manifest.webmanifest'];
+const SHELL_FILES = ['./', './index.html', './styles.css', './app.js', './deck-rules.js', './i18n.js', './card-filters.js', './card-catalog.js', './manifest.webmanifest'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.addAll(SHELL_FILES)));
@@ -30,14 +30,21 @@ async function cacheCardImage(request) {
   return response;
 }
 
-async function staleWhileRevalidate(request) {
+async function shellNetworkFirst(request) {
   const cache = await caches.open(SHELL_CACHE);
-  const cached = await cache.match(request);
-  const network = fetch(request).then(response => {
-    if (response.ok) cache.put(request, response.clone());
+  try {
+    const response = await fetch(request, { cache: 'no-cache' });
+    if (response.ok) await cache.put(request, response.clone());
+    else {
+      const cached = await cache.match(request);
+      if (cached) return cached;
+    }
     return response;
-  }).catch(() => cached);
-  return cached || network;
+  } catch (error) {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    throw error;
+  }
 }
 
 async function networkFirst(request) {
@@ -83,5 +90,5 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  event.respondWith(staleWhileRevalidate(event.request));
+  event.respondWith(shellNetworkFirst(event.request));
 });
