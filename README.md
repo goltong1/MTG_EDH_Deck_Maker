@@ -18,7 +18,10 @@ Scryfall 카드 데이터로 Commander와 주요 60장 Constructed 포맷의 덱
 
 60장 Constructed 포맷은 메인 덱 최소 60장, 사이드보드 최대 15장, 메인 덱과 사이드보드를 합친 카드명별 복사 제한을 검사합니다. Vintage와 Timeless의 `restricted` 카드는 합계 1장으로 검사합니다. 기본 대지와 카드 자체에 별도 덱 구성 문구가 있는 카드는 예외를 반영합니다.
 
-## v4.2 사용 방법
+## v4.3 사용 방법
+
+- 블랙·차콜과 금색을 중심으로 MTG 분위기의 화면을 적용했습니다. Constructed 사이드보드는 메인 덱 바로 아래에 배치합니다.
+- **카드 스캔**에서 카메라 촬영 또는 이미지 업로드 → 카드명 인식 → 후보 확인 → 덱 추가를 사용할 수 있습니다. 영어·한국어·일본어 인쇄 언어 선택, 회전·인식 영역 선택, 이름 수정, 수량 및 구역 선택을 지원합니다. 모델과 사용 범위는 [SCANNING.md](SCANNING.md)를 참고하세요.
 
 - 덱 상단의 **카드 보기 / 텍스트 보기**에서 표시 방식을 전환합니다. 텍스트 모드에서는 이미지 없이 유형별 수량·카드명·마나 비용을 볼 수 있고, 수량 변경·제거·드래그도 그대로 사용할 수 있습니다.
 - **목록 복사 / TXT 저장**은 커맨더, 메인 덱, 사이드보드 중 현재 포맷에 사용하는 전체 구역을 내보냅니다. 변경한 수량이 즉시 반영됩니다.
@@ -32,6 +35,8 @@ Scryfall 카드 데이터로 Commander와 주요 60장 Constructed 포맷의 덱
 - 39,288장 압축 DB가 포함되어 있습니다. `카드 DB → 브라우저 DB 설치`를 실행하면 로컬 검색과 덱 목록 가져오기에 사용할 수 있습니다. 카드 이미지는 최초 로딩에 네트워크가 필요합니다.
 
 ### English
+
+The obsidian-and-brass interface places the sideboard directly below the main deck. **Scan cards** lets you upload or capture a card, recognize its name with browser-local OCR, review matches, and add it to your chosen deck zone. See [SCANNING.md](SCANNING.md) for supported languages, model research, privacy and limitations.
 
 Choose **English** in the top bar. Filter by color, type, mana value, rarity and keyword; selections are OR within each group and AND across groups. Drop cards anywhere in the main deck to sort them automatically. Commander and sideboard cards go in their dedicated zones. Use **Card library / My deck** tabs on mobile and **+** to add cards. UI language and card print language are separate settings.
 

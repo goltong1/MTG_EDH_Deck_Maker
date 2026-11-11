@@ -1,7 +1,8 @@
-const SHELL_CACHE = 'deck-canvas-shell-pages-v4-2-release';
+const SHELL_CACHE = 'deck-canvas-shell-pages-v4-3-scan';
 const IMAGE_CACHE = 'deck-canvas-card-images-v3';
+const MODEL_CACHE = 'deck-canvas-ocr-v6-0-1-core6-1-2';
 const DATA_CACHE = 'deck-canvas-published-db-v2';
-const SHELL_FILES = ['./', './index.html', './styles.css', './app.js', './deck-rules.js', './i18n.js', './card-filters.js', './card-catalog.js', './manifest.webmanifest'];
+const SHELL_FILES = ['./', './index.html', './styles.css', './app.js', './deck-rules.js', './i18n.js', './card-filters.js', './card-catalog.js', './card-scanner.js', './scan-matcher.js', './scan-theme.css', './manifest.webmanifest'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.addAll(SHELL_FILES)));
@@ -11,7 +12,7 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys => Promise.all(keys
-      .filter(key => (key.startsWith('commander-canvas-') || key.startsWith('deck-canvas-')) && ![SHELL_CACHE, IMAGE_CACHE, DATA_CACHE].includes(key))
+      .filter(key => (key.startsWith('commander-canvas-') || key.startsWith('deck-canvas-')) && ![SHELL_CACHE, IMAGE_CACHE, DATA_CACHE, MODEL_CACHE].includes(key))
       .map(key => caches.delete(key))))
   );
   self.clients.claim();
@@ -79,6 +80,17 @@ self.addEventListener('fetch', event => {
   }
 
   if (url.origin !== self.location.origin) return;
+
+  if (url.pathname.includes('/vendor/tesseract/')) {
+    event.respondWith(caches.open(MODEL_CACHE).then(async cache => {
+      const cached = await cache.match(event.request);
+      if (cached) return cached;
+      const response = await fetch(event.request);
+      if (response.ok) await cache.put(event.request, response.clone());
+      return response;
+    }));
+    return;
+  }
 
   if (url.pathname.endsWith('/data/meta.json')) {
     event.respondWith(networkFirst(event.request));

@@ -1,6 +1,6 @@
 {
   "name": "deck-canvas-github-pages",
-  "version": "4.2.0",
+  "version": "4.3.0",
   "private": true,
   "type": "module",
   "description": "Static GitHub Pages MTG deck builder for Commander and major 60-card Constructed formats",
@@ -8,7 +8,7 @@
     "dev": "node dev-server.mjs",
     "start": "node dev-server.mjs",
     "build:data": "node scripts/build-card-db.mjs",
-    "check": "node --check public/app.js && node --check public/deck-rules.js && node --check public/i18n.js && node --check public/card-filters.js && node --check public/card-catalog.js && node --check public/service-worker.js && node --check scripts/build-card-db.mjs && node tests/deck-rules.test.mjs && node --test tests/build-card-db.test.mjs tests/card-filters.test.mjs"
+    "check": "node --check public/card-scanner.js && node --check public/scan-matcher.js && node --check public/app.js && node --check public/deck-rules.js && node --check public/i18n.js && node --check public/card-filters.js && node --check public/card-catalog.js && node --check public/service-worker.js && node --check scripts/build-card-db.mjs && node tests/deck-rules.test.mjs && node --test tests/build-card-db.test.mjs tests/card-filters.test.mjs tests/scan-matcher.test.mjs"
   },
   "engines": {
     "node": ">=20"

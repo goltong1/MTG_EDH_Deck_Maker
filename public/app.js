@@ -1,3 +1,4 @@
+import { setupCardScanner } from './card-scanner.js';
 import { t, getLanguage, setLanguage, locale, translateDocument } from './i18n.js';
 import { normalizeText, createCardNameIndex } from './card-catalog.js';
 import { FILTER_OPTIONS, emptyFilters, matchesVisualFilters, visualFilterQuery, sectionForCard, mainDropTarget } from './card-filters.js';
@@ -58,6 +59,8 @@ const state = {
   localDb: { ready: false, updating: false, cardCount: 0, autoUpdate: false, autoUpdateDays: 1 }
 };
 
+let cardScanner;
+let scanCatalogPromise;
 const el = id => document.getElementById(id);
 const elements = {
   searchForm: el('searchForm'), searchInput: el('searchInput'), searchResults: el('searchResults'),
@@ -295,6 +298,7 @@ function addCard(card, section = sectionForCard(card), quantity = 1, quiet = fal
   }
   markDirty(); renderDeck();
   if (!quiet) toast(t("{p0} 추가", { p0: cardName(card) }), 'success');
+  return true;
 }
 
 function handleDrop(payload, targetSection) {
@@ -1507,6 +1511,7 @@ function changeUiLanguage(language) {
     if (state.importMode) elements.textDialogHelp.textContent = t('Arena/Moxfield의 Commander, Deck, Sideboard 헤더와 *CMDR* 표식을 인식합니다. 커맨더 표식이 없고 현재 포맷이 Commander라면 Standard로 전환하므로, 가져온 뒤 원하는 포맷을 선택하세요.');
     else refreshExportText();
   }
+  cardScanner?.translate();
   elements.toastStack.replaceChildren();
 }
 
@@ -1536,11 +1541,49 @@ function bindVisualFilterEvents() {
   el('deckTab').addEventListener('click', () => setMobilePanel('deck'));
 }
 
+async function scannerCatalog() {
+  if (localCards.length) return localCards;
+  // The packaged catalog is loaded once, only after the first recognition/search.
+  if (!scanCatalogPromise) scanCatalogPromise = installLocalDatabase(false)
+    .then(() => localCards).finally(() => { scanCatalogPromise = null; });
+  return scanCatalogPromise;
+}
+
+async function scannerSearchNames(queries, language) {
+  const cards = new Map();
+  for (const name of queries.slice(0, 3)) {
+    const safeName = name.replace(/["\\]/g, ' ').trim().replace(/(?<=[\u3040-\u30ff\u3400-\u9fff])\s+(?=[\u3040-\u30ff\u3400-\u9fff])/gu, '');
+    if (safeName.length < 2) continue;
+    try {
+      if (language === 'en') {
+        const card = await queuedScryfallJson(`/cards/named?fuzzy=${encodeURIComponent(safeName)}`, {}, 12_000);
+        cards.set(card.id, card);
+      } else {
+        const query = async exact => queuedScryfallJson(`/cards/search?q=${encodeURIComponent(`lang:${language} ${exact ? '!' : 'name:'}"${safeName}"`)}&unique=cards&include_multilingual=true`, {}, 12_000);
+        let result, exactMatch = true;
+        try { result = await query(true); }
+        catch (error) { if (error.status !== 404) throw error; exactMatch = false; result = await query(false); }
+        // Rank the whole returned page. A short translated name can match many
+        // names, so truncating before matching would discard its exact card.
+        for (const card of result.data || []) cards.set(card.id, card);
+        if (exactMatch && cards.size) break;
+      }
+    } catch (error) { if (error.status !== 404) throw error; }
+    if (cards.size >= 5) break;
+  }
+  return [...cards.values()];
+}
+
 async function init() {
   createSections();
   loadSavedDeck();
   regroupMainDeck();
   bindEvents();
+  cardScanner = setupCardScanner({
+    getCatalog: scannerCatalog, searchNames: scannerSearchNames,
+    addCard: (card, section, quantity) => addCard(publicCard(card), section, quantity),
+    getFormat: currentFormat, cardImage, onAdded: () => persistDeck(false)
+  });
   translateDocument();
   renderVisualFilters();
   renderDeck();

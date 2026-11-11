@@ -8,7 +8,7 @@ const port = Number(process.env.PORT || 4173);
 const mime = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8', '.gz': 'application/gzip', '.webmanifest': 'application/manifest+json',
-  '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon'
+  '.wasm': 'application/wasm', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon'
 };
 
 http.createServer(async (req, res) => {

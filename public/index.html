@@ -6,19 +6,21 @@
   <meta name="description" content="Deck Canvas — your next great deck starts here. A bilingual Magic deck builder." />
   <title>Deck Canvas · MTG Deck Builder</title>
   <link rel="manifest" href="./manifest.webmanifest" />
-  <meta name="theme-color" content="#11151c" />
+  <meta name="theme-color" content="#090909" />
   <link rel="preconnect" href="https://cards.scryfall.io" crossorigin />
   <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./scan-theme.css" />
 </head>
 <body data-mobile-panel="library">
   <header class="topbar">
     <a class="brand" href="./" aria-label="Deck Canvas">
-      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M16 3 28 10v12L16 29 4 22V10Z" stroke="currentColor" stroke-width="1.6"/><path d="m10 11 6-4 6 4v10l-6 4-6-4Z" fill="currentColor" opacity=".2"/><path d="m10 11 6 4 6-4M16 15v10" stroke="currentColor" stroke-width="1.6"/></svg></span>
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 40 44" fill="none"><path d="M20 2 36 14v16L20 42 4 30V14Z" stroke="currentColor" opacity=".55"/><path d="m20 8 4 14 9-8-5 15-8 7-8-7-5-15 9 8Z" fill="currentColor"/><path d="m20 18-4 12 4 4 4-4Z" fill="#101010"/></svg></span>
       <span><h1>Deck Canvas<span class="brand-dot">.</span></h1><p data-i18n="다음 멋진 덱의 시작">다음 멋진 덱의 시작</p></span>
     </a>
     <div class="top-actions">
       <button class="btn ghost" id="newDeckBtn" data-i18n="새 덱">새 덱</button>
       <span class="action-divider"></span>
+      <button class="btn scan-launch" id="scanBtn" type="button"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h4l2-3h4l2 3h4v13H4Z"/><circle cx="12" cy="13" r="3.5"/></svg><span data-i18n="카드 스캔">카드 스캔</span></button>
       <button class="btn ghost" id="importBtn" data-i18n="가져오기">가져오기</button>
       <button class="btn ghost" id="exportBtn" data-i18n="내보내기">내보내기</button>
       <button class="btn ghost" id="localDbBtn" data-i18n="카드 DB">카드 DB</button>
@@ -33,7 +35,7 @@
   <main class="app-shell">
     <aside class="search-panel panel">
       <div class="panel-heading">
-        <div><span class="eyebrow">THE COLLECTION</span><h2 data-i18n="가능성을 발견하세요">가능성을 발견하세요</h2></div>
+        <div><span class="eyebrow">THE SPELLBOOK</span><h2 data-i18n="가능성을 발견하세요">가능성을 발견하세요</h2></div>
         <button class="icon-btn" id="collapseSearchBtn" title="검색창 접기" data-i18n-title="검색창 접기" aria-label="검색창 접기" data-i18n-aria-label="검색창 접기">‹</button>
       </div>
       <form id="searchForm" class="search-form">
@@ -83,7 +85,7 @@
       <div class="pagination hidden" id="pagination"><button class="btn ghost" id="prevPageBtn" data-i18n="이전">이전</button><span id="pageLabel" data-i18n="1페이지">1페이지</span><button class="btn ghost" id="nextPageBtn" data-i18n="다음">다음</button></div>
     </aside>
     <section class="workspace" data-section="main" aria-label="메인 덱 자동 분류 영역" data-i18n-aria-label="메인 덱 자동 분류 영역">
-      <div class="workspace-kicker"><span class="eyebrow">YOUR DECK, YOUR WAY</span><span class="workspace-badge">DECK BUILDER</span></div>
+      <div class="workspace-kicker"><span class="eyebrow">FORGE YOUR NEXT DECK</span><span class="workspace-badge">DECK BUILDER</span></div>
       <div class="deck-toolbar panel">
         <div class="deck-title-wrap"><input id="deckName" value="새 커맨더 덱" aria-label="덱 이름" data-i18n-aria-label="덱 이름" /><div class="deck-subline"><span id="autosaveStatus" data-i18n="저장되지 않은 변경사항 없음">저장되지 않은 변경사항 없음</span><span class="dot">·</span><span id="deckIdentity" data-i18n="색 정체성: 미지정">색 정체성: 미지정</span></div></div>
         <div class="format-picker"><label for="deckFormat" data-i18n="포맷">포맷</label><select id="deckFormat" aria-label="덱 포맷" data-i18n-aria-label="덱 포맷"><option value="commander">Commander</option><option value="standard">Standard</option><option value="pioneer">Pioneer</option><option value="modern">Modern</option><option value="legacy">Legacy</option><option value="vintage">Vintage</option><option value="pauper">Pauper</option><option value="explorer">Explorer</option><option value="historic">Historic</option><option value="timeless">Timeless</option><option value="alchemy">Alchemy</option></select><span id="formatRuleHint" data-i18n="커맨더 포함 정확히 100장">커맨더 포함 정확히 100장</span></div>
@@ -108,19 +110,21 @@
         <div id="commanderCards" class="commander-cards"></div>
         <div id="commanderPlaceholder" class="drop-placeholder"><strong data-i18n="덱의 중심이 될 커맨더">덱의 중심이 될 커맨더</strong><span data-i18n="전설적 생물을 여기에 놓으세요. Partner 조합도 지원합니다.">전설적 생물을 여기에 놓으세요. Partner 조합도 지원합니다.</span></div>
       </div>
-      <div id="sideboardZone" class="sideboard-zone panel drop-zone hidden" data-section="sideboard">
-        <div class="zone-label"><span class="sideboard-icon">↔</span><div><span class="eyebrow">SIDEBOARD</span><h2 data-i18n="사이드보드">사이드보드</h2></div><span class="zone-count" id="sideboardCount">0 / 15</span></div>
-        <div id="sideboardCards" class="sideboard-cards"></div><div id="sideboardPlaceholder" class="drop-placeholder"><strong data-i18n="상황에 맞는 다음 한 수">상황에 맞는 다음 한 수</strong><span data-i18n="사이드보드로 쓸 카드는 여기에 놓으세요.">사이드보드로 쓸 카드는 여기에 놓으세요.</span></div>
-      </div>
       <div class="deck-layout">
+        <div class="deck-stack">
         <div class="deck-board panel">
           <div class="board-heading"><div><span class="eyebrow">MAIN DECK</span><h2 id="mainDeckHeading" data-i18n="메인 덱 구성">메인 덱 구성</h2></div><div class="board-controls"><button class="btn small ghost" id="sortDeckBtn" data-i18n="유형별 정리">유형별 정리</button><button class="btn small danger-outline" id="clearDeckBtn" data-i18n="비우기">비우기</button></div></div>
           <div id="mainDropHint" class="auto-drop-hint"><span class="drop-arrow" aria-hidden="true"><svg viewBox="0 0 24 24" width="25" height="25" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 5l14 14M7 19h12V7"/></svg></span><div><strong data-i18n="어디에 놓아도, 제자리로.">어디에 놓아도, 제자리로.</strong><p data-i18n="메인 덱에 놓으면 카드 유형별로 자동 분류됩니다.">메인 덱에 놓으면 카드 유형별로 자동 분류됩니다.</p></div><span class="auto-tag">AUTO</span></div>
           <div id="deckSections" class="deck-sections"></div>
           <div id="trashZone" class="trash-zone" aria-label="카드 삭제 영역" data-i18n-aria-label="카드 삭제 영역">× <span data-i18n="여기에 놓아 제거">여기에 놓아 제거</span></div>
         </div>
+      <div id="sideboardZone" class="sideboard-zone panel drop-zone hidden" data-section="sideboard">
+        <div class="zone-label"><span class="sideboard-icon">↔</span><div><span class="eyebrow">SIDEBOARD</span><h2 data-i18n="사이드보드">사이드보드</h2></div><span class="zone-count" id="sideboardCount">0 / 15</span></div>
+        <div id="sideboardCards" class="sideboard-cards"></div><div id="sideboardPlaceholder" class="drop-placeholder"><strong data-i18n="상황에 맞는 다음 한 수">상황에 맞는 다음 한 수</strong><span data-i18n="사이드보드로 쓸 카드는 여기에 놓으세요.">사이드보드로 쓸 카드는 여기에 놓으세요.</span></div>
+      </div>
+        </div>
         <aside class="inspector-column">
-          <div class="panel analytics-card"><div class="panel-heading compact"><div><span class="eyebrow">A LITTLE BALANCE</span><h2 data-i18n="마나 커브">마나 커브</h2></div><span class="analytics-symbol">▥</span></div><div id="manaCurve" class="mana-curve"></div><div class="type-breakdown" id="typeBreakdown"></div></div>
+          <div class="panel analytics-card"><div class="panel-heading compact"><div><span class="eyebrow">MANA & MOMENTUM</span><h2 data-i18n="마나 커브">마나 커브</h2></div><span class="analytics-symbol">▥</span></div><div id="manaCurve" class="mana-curve"></div><div class="type-breakdown" id="typeBreakdown"></div></div>
           <div class="panel validation-card"><div class="panel-heading compact"><div><span class="eyebrow">READY TO PLAY?</span><h2 data-i18n="덱 검사">덱 검사</h2></div><span id="validityBadge" class="status-badge neutral" data-i18n="작성 중">작성 중</span></div><div id="validationSummary" class="validation-summary"></div><ul id="validationIssues" class="validation-issues"></ul></div>
           <p class="workspace-footnote">Built for your next great game.<br><span>Card data & artwork by Scryfall.</span></p>
         </aside>
@@ -192,6 +196,36 @@
         <button class="btn primary" id="updateLocalDbBtn" type="button" data-i18n="지금 업데이트">지금 업데이트</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="scanDialog" class="scan-dialog" aria-labelledby="scanTitle">
+    <div class="scan-header"><div><span class="eyebrow">FROM YOUR HAND TO YOUR DECK</span><h2 id="scanTitle" data-i18n="카드 스캔">카드 스캔</h2></div><button class="icon-btn" id="scanCloseBtn" type="button" aria-label="닫기" data-i18n-aria-label="닫기">×</button></div>
+    <p class="scan-intro" data-i18n="사진 속 카드명을 읽어 덱에 추가합니다. 한 번에 한 장씩, 이름이 선명하게 보이도록 촬영하세요.">사진 속 카드명을 읽어 덱에 추가합니다. 한 번에 한 장씩, 이름이 선명하게 보이도록 촬영하세요.</p>
+    <div class="scan-layout">
+      <section class="scan-source" aria-labelledby="scanSourceTitle">
+        <h3 id="scanSourceTitle"><span>01</span> <span data-i18n="사진 준비">사진 준비</span></h3>
+        <div class="scan-source-actions"><button type="button" class="btn" id="scanUploadBtn" data-i18n="이미지 불러오기">이미지 불러오기</button><button type="button" class="btn ghost" id="scanCameraBtn" data-i18n="카메라 켜기">카메라 켜기</button></div>
+        <input type="file" id="scanFile" accept="image/*" class="hidden" aria-label="카드 이미지" data-i18n-aria-label="카드 이미지">
+        <div class="scan-stage">
+          <div id="scanEmpty" class="scan-empty"><svg width="76" height="100" viewBox="0 0 76 100" fill="none" aria-hidden="true"><rect x="10" y="5" width="56" height="80" rx="5" stroke="currentColor"/><rect x="16" y="12" width="44" height="35" rx="2" stroke="currentColor" opacity=".5"/><path d="M19 58h38M19 66h25M19 74h31M3 19V3h16M57 3h16v16M3 79v16h16M57 95h16V79" stroke="currentColor"/></svg><strong data-i18n="카드 한 장을 준비하세요">카드 한 장을 준비하세요</strong><span data-i18n="이미지를 여기에 끌어놓아도 됩니다.">이미지를 여기에 끌어놓아도 됩니다.</span><small>JPG · PNG · WebP · 25 MB</small></div>
+          <div id="scanPreview" class="hidden"><canvas id="scanCanvas" aria-label="카드 인식 영역. 드래그로 카드 또는 이름 영역을 선택합니다." data-i18n-aria-label="카드 인식 영역. 드래그로 카드 또는 이름 영역을 선택합니다."></canvas><div class="scan-image-tools"><button class="btn small ghost" type="button" id="scanRotateBtn" data-i18n="90° 회전">90° 회전</button><button class="btn small ghost" type="button" id="scanResetCropBtn" data-i18n="전체 이미지">전체 이미지</button></div></div>
+          <div id="scanLive" class="hidden"><div class="scan-camera-frame"><video id="scanVideo" autoplay playsinline muted></video><div id="scanCameraGuide" aria-hidden="true"></div></div><div class="scan-camera-tools"><button type="button" class="btn primary" id="scanCaptureBtn" data-i18n="촬영">촬영</button><button type="button" class="btn ghost" id="scanStopCameraBtn" data-i18n="카메라 닫기">카메라 닫기</button></div></div>
+        </div>
+        <p class="scan-tip" data-i18n="반사광을 피하고 정면에서 촬영하세요. 사진 위를 드래그하면 인식 영역을 좁힐 수 있습니다.">반사광을 피하고 정면에서 촬영하세요. 사진 위를 드래그하면 인식 영역을 좁힐 수 있습니다.</p>
+        <div class="scan-recognize-row"><label for="scanLanguage" data-i18n="카드 인쇄 언어">카드 인쇄 언어</label><select id="scanLanguage"><option value="en">English</option><option value="ko">한국어</option><option value="ja">日本語 · β</option></select><button class="btn primary" type="button" id="scanRecognizeBtn" disabled data-i18n="카드 인식">카드 인식</button></div>
+        <p class="scan-privacy" data-i18n="사진은 기기에서만 처리합니다. 온라인 대조 시 카드명만 Scryfall에 전달하며, 한국어·일본어는 연결이 필요합니다.">사진은 기기에서만 처리합니다. 온라인 대조 시 카드명만 Scryfall에 전달하며, 한국어·일본어는 연결이 필요합니다.</p>
+      </section>
+      <section class="scan-review" aria-labelledby="scanReviewTitle">
+        <h3 id="scanReviewTitle"><span>02</span> <span data-i18n="인식 결과 확인">인식 결과 확인</span></h3>
+        <div class="scan-status-box" role="status"><p id="scanStatus"></p><progress id="scanProgress" max="100" value="0" class="hidden"></progress><button type="button" class="text-btn hidden" id="scanCancelBtn" data-i18n="인식 취소">인식 취소</button></div>
+        <div id="scanCandidates" class="scan-candidates"></div>
+        <p id="scanResultsEmpty" class="scan-results-empty" data-i18n="인식 후보가 여기에 표시됩니다. 카드가 맞는지 확인한 뒤 선택하세요.">인식 후보가 여기에 표시됩니다. 카드가 맞는지 확인한 뒤 선택하세요.</p>
+        <form id="scanNameForm" class="scan-name-form"><label for="scanNameInput" data-i18n="읽힌 이름 수정 / 직접 찾기">읽힌 이름 수정 / 직접 찾기</label><div><input id="scanNameInput" type="text" autocomplete="off" maxlength="100" placeholder="예: Sol Ring" data-i18n-placeholder="예: Sol Ring"><button class="btn" type="submit" id="scanNameBtn" data-i18n="찾기">찾기</button></div></form>
+        <details id="scanOcrDetails" class="scan-ocr-details hidden"><summary data-i18n="읽힌 글자 보기">읽힌 글자 보기</summary><pre id="scanReadText"></pre></details>
+        <div class="scan-add-panel"><h3><span>03</span> <span data-i18n="덱에 추가">덱에 추가</span></h3><div class="scan-add-options"><label><span data-i18n="추가할 구역">추가할 구역</span><select id="scanTarget"></select></label><label><span data-i18n="수량">수량</span><input id="scanQuantity" type="number" min="1" max="99" step="1" value="1" inputmode="numeric"></label></div><button class="btn primary" type="button" id="scanAddBtn" disabled data-i18n="선택한 카드 추가">선택한 카드 추가</button></div>
+        <p class="scan-tip" data-i18n="카드명 기준으로 찾습니다. 세트·포일·재판 버전까지 구분하지는 않습니다.">카드명 기준으로 찾습니다. 세트·포일·재판 버전까지 구분하지는 않습니다.</p>
+      </section>
+    </div>
   </dialog>
 
   <template id="sectionTemplate">
