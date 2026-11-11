@@ -8,12 +8,12 @@ const TYPE_LINES = /^(legendary |basic |snow |world |tribal |kindred )*(artifact
 export function scanNameQueries(text) {
   const queries = [];
   for (const raw of String(text).split(/[\r\n]+/).slice(0, 12)) {
-    const line = raw.replace(/\{[^}]*\}/g, '').replace(/[|©®™]/g, ' ').replace(/^[^\p{L}\p{N}]+/u, '')
+    const line = raw.replace(/\{[0-9WUBRGCXYZSP/]+\}/gi, '').replace(/[|©®™]/g, ' ').replace(/^[^\p{L}\p{N}]+/u, '')
       .replace(/\s+/g, ' ').trim();
     const minimum = /[가-힣\u3040-\u30ff\u3400-\u9fff]/.test(line) ? 2 : 3;
     const enoughLetters = minimum === 2 ? (line.match(/\p{L}/gu) || []).length >= 2 : /\p{L}{2}/u.test(line);
     if (line.length < minimum || line.length > 100 || !enoughLetters || TYPE_LINES.test(line)) continue;
-    const trimmed = line.replace(/[^\p{L}\p{N}]+$/u, '').replace(/\s+[\d(){}\[\]◆◇○●◎WUBRGC/]+$/i, '').trim();
+    const trimmed = line.replace(/\s+[\]}〉」』]\s+.+$/u, '').replace(/[^\p{L}\p{N}]+$/u, '').replace(/\s+(?:[^\p{L}]*\d[^\p{L}]*|[\d(){}\[\]◆◇○●◎WUBRGC/]+)$/iu, '').trim();
     if (trimmed !== line && trimmed.length >= minimum) queries.push(trimmed);
     queries.push(line);
     if (queries.length >= 8) break;
@@ -38,12 +38,24 @@ export function createScanIndex(cards) {
     const names = [card.name, card.printed_name, ...(card.card_faces || []).flatMap(face => [face.name, face.printed_name])];
     for (const name of new Set(names.filter(Boolean))) index.push({ card, name, key: normalizeScanName(name), alias: name !== card.name && name !== card.printed_name });
   }
+  const exact = new Map();
+  for (const item of index) { if (!exact.has(item.key)) exact.set(item.key, []); exact.get(item.key).push(item); }
+  Object.defineProperty(index, 'exact', { value: exact });
   return index;
 }
 
 export function matchScanNames(text, index, limit = 5) {
   const queries = scanNameQueries(text).map(normalizeScanName).filter(q => q.length >= (/[가-힣\u3040-\u30ff\u3400-\u9fff]/.test(q) ? 2 : 3));
   const hits = new Map();
+  // Most clear card titles match exactly. Avoid full-catalog edit-distance work for these.
+  if (index.exact) {
+    for (const [i, q] of queries.entries()) for (const item of index.exact.get(q) || []) {
+      const id = item.card.oracle_id || item.card.id || item.card.name;
+      const score = 1 - Math.min(i, 5) * .004 - (item.alias ? .02 : 0);
+      if (!hits.has(id) || hits.get(id).score < score) hits.set(id, { card:item.card, matchedName:item.name, score, exactName:true });
+    }
+    if (hits.size) return [...hits.values()].sort((a,b)=>b.score-a.score || a.card.name.localeCompare(b.card.name)).slice(0,limit);
+  }
   for (const item of index) {
     let score = 0, exactName = false;
     for (let i = 0; i < queries.length; i++) {

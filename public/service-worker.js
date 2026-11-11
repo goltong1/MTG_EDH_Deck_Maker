@@ -1,8 +1,8 @@
-const SHELL_CACHE = 'deck-canvas-shell-pages-v4-3-scan';
+const SHELL_CACHE = 'deck-canvas-shell-pages-v4-4-multi';
 const IMAGE_CACHE = 'deck-canvas-card-images-v3';
-const MODEL_CACHE = 'deck-canvas-ocr-v6-0-1-core6-1-2';
+const MODEL_CACHE = 'deck-canvas-models-v4-4-obb';
 const DATA_CACHE = 'deck-canvas-published-db-v2';
-const SHELL_FILES = ['./', './index.html', './styles.css', './app.js', './deck-rules.js', './i18n.js', './card-filters.js', './card-catalog.js', './card-scanner.js', './scan-matcher.js', './scan-theme.css', './manifest.webmanifest'];
+const SHELL_FILES = ['./', './index.html', './styles.css', './app.js', './deck-rules.js', './i18n.js', './card-filters.js', './card-catalog.js', './card-scanner.js', './card-detector.js', './card-detector-worker.js', './scan-geometry.js', './scan-matcher.js', './scan-theme.css', './manifest.webmanifest'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(SHELL_CACHE).then(cache => cache.addAll(SHELL_FILES)));
@@ -81,7 +81,7 @@ self.addEventListener('fetch', event => {
 
   if (url.origin !== self.location.origin) return;
 
-  if (url.pathname.includes('/vendor/tesseract/')) {
+  if (/\/vendor\/(tesseract|onnxruntime|card-detector)\//.test(url.pathname)) {
     event.respondWith(caches.open(MODEL_CACHE).then(async cache => {
       const cached = await cache.match(event.request);
       if (cached) return cached;

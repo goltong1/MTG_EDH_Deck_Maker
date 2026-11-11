@@ -177,3 +177,39 @@ dialog::backdrop { background:#000b; backdrop-filter:blur(6px); }
 }
 @media(prefers-reduced-motion:reduce) { .scan-dialog * { scroll-behavior:auto; } }
 .search-box>button { background:#2a2318; color:#cbb184; border-color:#5a462b; }
+/* v4.4 — multi-card review */
+.scan-dialog { width:min(1180px,calc(100vw - 32px)); }
+.scan-layout { grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);align-items:start; }
+.scan-source { position:sticky;top:0; }
+.scan-queue-heading { display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px; }
+.scan-queue-heading strong { font-size:11px;color:#cbb485; }
+.scan-queue-heading .text-btn { font-size:10px;color:#a89a80; }
+.scan-queue { display:flex;flex-direction:column;gap:6px;max-height:288px;overflow:auto;padding:2px; }
+.scan-queue-row { display:flex;align-items:center;gap:7px;border:1px solid #3c3224;border-radius:4px;background:#181510;padding:6px 8px; }
+.scan-queue-row.active { border-color:#d4b271;box-shadow:inset 2px 0 #d4b271;background:#292115; }
+.scan-queue-row.added { opacity:.58; }
+.scan-queue-row .scan-include { width:17px;height:17px;accent-color:#d4b271;flex-shrink:0; }
+.scan-item-focus { display:flex;align-items:center;gap:10px;flex:1;min-width:0;text-align:left;background:none;border:0;color:inherit;padding:0;cursor:pointer; }
+.scan-item-focus img { width:38px;height:53px;object-fit:contain;flex-shrink:0;background:#080808;border-radius:2px; }
+.scan-item-focus span { min-width:0; }
+.scan-item-focus small { font-size:9px;color:#ab9875; }
+.scan-item-focus strong { display:block;font-size:12px;font-weight:550;line-height:1.5;overflow-wrap:anywhere; }
+.scan-item-focus em { display:block;font-style:normal;font-size:10px;color:#ac9b80; }
+.scan-remove { align-self:stretch;background:none;color:#bcaa8c;border:0;cursor:pointer;min-width:25px;font-size:20px; }
+.scan-select-actions,.scan-active-actions { display:flex;gap:7px;flex-wrap:wrap;margin:10px 0; }
+.scan-active-title { margin:19px 0 6px;font-size:12px;color:#ddc496; }
+.scan-detail-option { display:flex;align-items:center;gap:7px;font-size:10px;color:#baa98b;margin-top:14px; }
+.scan-detail-option input { accent-color:#c6a368; }
+.scan-candidates { max-height:190px; }
+.scan-add-panel>#scanAddBtn { margin-top:7px; }
+.scan-camera-frame #scanCameraGuide { inset:5%;width:90%;height:90%;border-radius:5px; }
+#scanCanvas { max-height:460px;max-width:100%;width:auto;height:auto;display:block;margin:auto; }
+@media(max-width:850px) {
+ .scan-layout { grid-template-columns:1fr;gap:24px; }
+ .scan-source { position:static; }
+ .scan-dialog { padding:18px 16px; }
+ #scanCanvas { max-height:none; }
+ .scan-stage,.scan-empty { min-height:220px; }
+}
+
+.scan-capacity {font-size:9px;color:#92836b;line-height:1.6;margin:0 0 9px;}

@@ -52,3 +52,21 @@ test('all scanner Korean strings have English translations, including progress a
   const strings = [...source.matchAll(/(['"])([^'"\n]*[가-힣][^'"\n]*)\1/g)].map(m => m[2]);
   for (const key of strings) assert.ok(EN[key], `Missing scanner translation: ${key}`);
 });
+
+// Card frames may be read as braces; only actual mana symbols should be stripped.
+test('OCR frame braces preserve card names while mana symbols are removed',()=>{
+ const hits=matchScanNames('—{ Lightning Bolt } {R}',createScanIndex([{name:'Lightning Bolt',id:'bolt'},{name:'Fishing Pole',id:'pole'}]));
+ assert.equal(hits[0].card.name,'Lightning Bolt');assert.equal(hits[0].exactName,true);
+});
+
+test('Currency-like OCR mana noise does not obscure a complete title',()=>{
+ const hits=matchScanNames('Counterspell           $4',createScanIndex([{name:'Counterspell',id:'counter'}]));
+ assert.equal(hits[0].exactName,true);
+});
+
+test('Frame separators keep a Korean title separate from misread mana glyphs',()=>{
+ for(const text of ['[살인 ] 옮','(살인 」 술']) {
+  const hit=matchScanNames(text,createScanIndex([{name:'Murder',printed_name:'살인',id:'murder'}]))[0];
+  assert.equal(hit.card.name,'Murder');assert.equal(hit.exactName,true);
+ }
+});

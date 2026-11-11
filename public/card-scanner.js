@@ -1,374 +1,308 @@
+// Multi-card integration: AGPL-3.0-or-later. See vendor/card-detector/NOTICE.md.
 import { t } from './i18n.js';
-import { createScanIndex, matchScanNames, scanNameQueries, clampCrop } from './scan-matcher.js';
+import { createScanIndex, matchScanNames, scanNameQueries, normalizeScanName, clampCrop } from './scan-matcher.js';
+import { createCardDetector, cropCard, rotateCard } from './card-detector.js';
+import { boxQuad, pointInQuad, polygonIoU, selectedScanItems, MAX_SCAN_CARDS } from './scan-geometry.js';
 
 const $ = id => document.getElementById(id);
 const OCR_ROOT = new URL('./vendor/tesseract/', import.meta.url);
-const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]);
 
 export function setupCardScanner({ getCatalog, searchNames, addCard, getFormat, cardImage, onAdded }) {
-  const dialog = $('scanDialog');
-  const canvas = $('scanCanvas');
-  const video = $('scanVideo');
-  let source = null, crop = null, dragStart = null, stream = null, worker = null;
-  let job = 0, busy = false, cameraStarting = false, candidates = [], selected = null;
-  let indexedCards = null, index = [], lastStatus = '', statusArgs = {};
+  const dialog=$('scanDialog'), canvas=$('scanCanvas'), video=$('scanVideo'), detector=createCardDetector();
+  let source=null, photo=0, nextId=0, items=[], activeId=null, dragStart=null, draft=null;
+  let stream=null, cameraStarting=false, worker=null, job=0, busy=false;
+  let indexedCards=null,index=[],lastStatus='',statusArgs={},lastProgress=null;
+  const active=()=>items.find(item=>item.id===activeId);
+  const currentItems=()=>items.filter(item=>item.photo===photo);
 
-  function status(key, args = {}, progress = null) {
-    lastStatus = key; statusArgs = args;
-    $('scanStatus').textContent = t(key, args);
-    $('scanProgress').classList.toggle('hidden', progress === null);
-    if (progress !== null) $('scanProgress').value = Math.max(0, Math.min(100, progress));
+  function status(key,args={},progress=null) {
+    lastStatus=key;statusArgs=args;lastProgress=progress;
+    $('scanStatus').textContent=t(key,args);
+    $('scanProgress').classList.toggle('hidden',progress===null);
+    if(progress!==null) $('scanProgress').value=Math.max(0,Math.min(100,progress));
   }
-
   function setBusy(value) {
-    busy = value;
-    dialog.setAttribute('aria-busy', String(value));
-    for (const id of ['scanUploadBtn', 'scanCameraBtn', 'scanLanguage', 'scanRotateBtn', 'scanResetCropBtn', 'scanNameBtn', 'scanNameInput']) $(id).disabled = value;
-    $('scanRecognizeBtn').disabled = value || !source;
-    $('scanCancelBtn').classList.toggle('hidden', !value);
-    $('scanAddBtn').disabled = value || !selected;
-    canvas.style.pointerEvents = value ? 'none' : '';
+    busy=value;dialog.setAttribute('aria-busy',String(value));
+    for(const id of ['scanUploadBtn','scanCameraBtn','scanLanguage','scanDetailed','scanNameBtn','scanNameInput','scanTarget','scanClearQueueBtn','scanSelectAll','scanSelectNone']) $(id).disabled=value;
+    for(const input of $('scanQueue').querySelectorAll('button,input')) input.disabled=value||input.dataset.locked==='true';
+    $('scanDetectBtn').disabled=value||!source||Boolean(stream);
+    $('scanWholeBtn').disabled=value||!source||Boolean(stream);
+    $('scanRecognizeBtn').disabled=value||Boolean(stream)||(!source&&!items.length);
+    $('scanReadActiveBtn').disabled=value||!active()||active().added;
+    $('scanRotateBtn').disabled=value||!active()||active().added;
+    $('scanQuantity').disabled=value||!active()||active().added;
+    for(const id of ['scanNameBtn','scanNameInput']) $(id).disabled=value||!active()||active().added;
+    $('scanCancelBtn').classList.toggle('hidden',!value);
+    $('scanAddBtn').disabled=value||!active()?.chosen||active().added;
+    $('scanBatchAddBtn').disabled=value||!selectedScanItems(items).length;
+    canvas.style.pointerEvents=value?'none':'';
+    for(const input of $('scanCandidates').querySelectorAll('input')) input.disabled=value||active()?.added;
   }
-
   function stopCamera() {
-    stream?.getTracks().forEach(track => track.stop()); stream = null;
-    video.srcObject = null; cameraStarting = false;
+    stream?.getTracks().forEach(track=>track.stop());stream=null;video.srcObject=null;cameraStarting=false;
     $('scanLive').classList.add('hidden');
   }
-
-  function cancel(showStatus = true) {
-    job++;
-    if (worker) { worker.terminate().catch(() => {}); worker = null; }
-    setBusy(false);
-    if (showStatus) status('인식을 취소했습니다.');
+  function cancel(show=true) {
+    job++;detector.cancel();
+    if(worker) {worker.terminate().catch(()=>{});worker=null;}
+    for(const item of items) if(item.state==='reading') item.state='pending';
+    setBusy(false);renderQueue();
+    if(show) status('중단했습니다. 완료된 인식 결과는 목록에 남아 있습니다.');
   }
-
-  function resetResults() {
-    candidates = []; selected = null;
-    renderResults();
-  }
-
   function syncTargets() {
-    const current = $('scanTarget').value;
-    const commander = getFormat().mode === 'commander';
-    $('scanTarget').innerHTML = `<option value="main">${escape(t('메인 덱'))}</option>` + (commander
-      ? `<option value="commander">${escape(t('커맨더'))}</option>`
-      : `<option value="sideboard">${escape(t('사이드보드'))}</option>`);
-    if ([...$('scanTarget').options].some(option => option.value === current)) $('scanTarget').value = current;
-    $('scanQuantity').max = $('scanTarget').value === 'commander' ? '1' : '99';
-    if ($('scanTarget').value === 'commander') $('scanQuantity').value = '1';
+    const value=$('scanTarget').value,commander=getFormat().mode==='commander';
+    $('scanTarget').innerHTML=`<option value="main">${escape(t('메인 덱'))}</option>`+(commander?`<option value="commander">${escape(t('커맨더'))}</option>`:`<option value="sideboard">${escape(t('사이드보드'))}</option>`);
+    if([...$('scanTarget').options].some(option=>option.value===value)) $('scanTarget').value=value;
   }
-
-  function renderResults() {
-    $('scanCandidates').innerHTML = '';
-    $('scanResultsEmpty').classList.toggle('hidden', candidates.length > 0);
-    for (const [i, hit] of candidates.entries()) {
-      const label = document.createElement('label');
-      label.className = `scan-candidate${selected === hit ? ' selected' : ''}`;
-      const image = cardImage(hit.card, 'small');
-      label.innerHTML = `<input type="radio" name="scan-card" value="${i}" ${selected === hit ? 'checked' : ''}>
-        ${image ? `<img src="${escape(image)}" alt="" loading="lazy">` : '<span class="scan-card-back">◇</span>'}
-        <span><strong>${escape(hit.card.printed_name || hit.card.name)}</strong>
-        ${hit.card.printed_name ? `<small>${escape(hit.card.name)}</small>` : ''}
-        <small>${escape(hit.card.type_line || '')}</small><em>${escape(t(hit.exactName ? '이름 일치 · 이미지 확인 필요' : '유사한 이름 · 이미지 확인 필요'))}</em></span>`;
-      label.querySelector('input').addEventListener('change', () => {
-        selected = hit;
-        for (const row of $('scanCandidates').children) row.classList.toggle('selected', row === label);
-        $('scanAddBtn').disabled = busy;
-      });
+  function renderQueue() {
+    const container=$('scanQueue');container.innerHTML='';
+    for(const item of items) {
+      const row=document.createElement('div');row.className=`scan-queue-row${item.id===activeId?' active':''}${item.added?' added':''}`;
+      const name=item.chosen?.card.printed_name||item.chosen?.card.name||t('이름 확인 필요');
+      const state=item.added?'추가 완료':item.state==='blocked'?'덱 규칙 확인':item.state==='reading'?'읽는 중…':item.state==='error'?'다시 시도':item.chosen?'후보 확인 필요':item.state==='pending'?'인식 대기':'이름 확인 필요';
+      row.innerHTML=`<input class="scan-include" type="checkbox" aria-label="${escape(t('카드 {n} 선택',{n:item.id}))}" ${item.checked?'checked':''} ${!item.chosen||item.added?'disabled data-locked="true"':''}><button type="button" class="scan-item-focus" aria-pressed="${item.id===activeId}"><img src="${item.thumb}" alt=""><span><small>#${item.id} · ${escape(t('사진 {n}',{n:item.photo}))}</small><strong>${escape(name)}</strong><em>${escape(t(state))} · ×${item.quantity}</em></span></button><button class="scan-remove" type="button" aria-label="${escape(t('카드 {n} 목록에서 제거',{n:item.id}))}">×</button>`;
+      row.querySelector('.scan-include').addEventListener('change',event=>{item.checked=event.target.checked;renderSummary();setBusy(busy);draw();});
+      row.querySelector('.scan-item-focus').addEventListener('click',()=>selectItem(item.id));
+      row.querySelector('.scan-remove').addEventListener('click',()=>{if(busy)return;items=items.filter(other=>other!==item);if(activeId===item.id)activeId=items[0]?.id??null;renderAll();});
+      container.append(row);
+    }
+    $('scanResultsEmpty').classList.toggle('hidden',items.length>0);
+    renderSummary();setBusy(busy);
+  }
+  function renderSummary() {
+    const selected=selectedScanItems(items),quantity=selected.reduce((n,item)=>n+item.quantity,0);
+    $('scanQueueSummary').textContent=t('검출 {count}개 · 선택 {selected}개 / {quantity}장',{count:items.length,selected:selected.length,quantity});
+  }
+  function renderCandidates() {
+    const item=active(),hits=item?.candidates||[];
+    $('scanActiveTitle').textContent=item?t('카드 {n} 확인',{n:item.id}):t('목록에서 카드를 선택하세요');
+    $('scanCandidates').innerHTML='';
+    $('scanNameInput').value=item?.query||'';
+    $('scanQuantity').value=item?.quantity||1;
+    $('scanReadText').textContent=item?.text||'';
+    $('scanOcrDetails').classList.toggle('hidden',!item?.text);
+    for(const [i,hit] of hits.entries()) {
+      const label=document.createElement('label');label.className=`scan-candidate${item.chosen===hit?' selected':''}`;
+      const img=cardImage(hit.card,'small');
+      label.innerHTML=`<input type="radio" name="scan-card" value="${i}" ${item.chosen===hit?'checked':''}>${img?`<img src="${escape(img)}" alt="" loading="lazy">`:'<span class="scan-card-back">◇</span>'}<span><strong>${escape(hit.card.printed_name||hit.card.name)}</strong>${hit.card.printed_name?`<small>${escape(hit.card.name)}</small>`:''}<small>${escape(hit.card.type_line||'')}</small><em>${escape(t(hit.exactName?'이름 일치 · 이미지 확인 필요':'유사한 이름 · 이미지 확인 필요'))}</em></span>`;
+      label.querySelector('input').addEventListener('change',()=>{item.chosen=hit;item.checked=true;item.query=hit.card.printed_name||hit.card.name;item.state='ready';renderAll();});
       $('scanCandidates').append(label);
     }
-    $('scanAddBtn').disabled = busy || !selected;
+    setBusy(busy);
   }
-
+  function renderAll(){renderQueue();renderCandidates();draw();}
+  function selectItem(id){activeId=id;renderAll();}
   function draw() {
-    if (!source) return;
-    canvas.width = source.width; canvas.height = source.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(source, 0, 0);
-    if (!crop) return;
-    ctx.fillStyle = 'rgba(0,0,0,.62)';
-    ctx.fillRect(0, 0, source.width, source.height);
-    ctx.drawImage(source, crop.x, crop.y, crop.width, crop.height, crop.x, crop.y, crop.width, crop.height);
-    ctx.strokeStyle = '#e3b972'; ctx.lineWidth = Math.max(2, source.width / 250);
-    ctx.strokeRect(crop.x, crop.y, crop.width, crop.height);
+    if(!source)return;
+    canvas.width=source.width;canvas.height=source.height;
+    const ctx=canvas.getContext('2d');ctx.drawImage(source,0,0);
+    for(const item of currentItems()) {
+      const color=item.added?'#83ba91':item.id===activeId?'#ffe2a0':item.chosen?'#d4b271':'#eb9b69';
+      ctx.beginPath();item.quad.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.closePath();
+      ctx.strokeStyle=color;ctx.lineWidth=Math.max(3,source.width/220);ctx.stroke();
+      if(item.id===activeId){ctx.fillStyle='#e4b76620';ctx.fill();}
+      const p=item.quad.reduce((a,b)=>b.y<a.y?b:a),size=Math.max(22,source.width/37);
+      ctx.fillStyle=color;ctx.fillRect(p.x,p.y,size*1.65,size*1.1);ctx.fillStyle='#111';ctx.font=`bold ${size*.8}px sans-serif`;ctx.fillText(String(item.id),p.x+size*.15,p.y+size*.85);
+    }
+    if(draft){ctx.strokeStyle='#fff';ctx.lineWidth=Math.max(2,source.width/300);ctx.setLineDash([12,8]);ctx.strokeRect(draft.x,draft.y,draft.width,draft.height);}
   }
-
-  function useImage(image, initialCrop = null) {
-    // Cap decoded working pixels before OCR, including high-resolution phone photos.
-    const ratio = Math.min(1, 2200 / Math.max(image.width, image.height));
-    source = document.createElement('canvas');
-    source.width = Math.round(image.width * ratio); source.height = Math.round(image.height * ratio);
-    source.getContext('2d').drawImage(image, 0, 0, source.width, source.height);
-    crop = initialCrop ? clampCrop({ x: initialCrop.x * ratio, y: initialCrop.y * ratio, width: initialCrop.width * ratio, height: initialCrop.height * ratio }, source.width, source.height) : null;
-    $('scanEmpty').classList.add('hidden'); $('scanPreview').classList.remove('hidden');
-    resetResults(); $('scanNameInput').value = '';
-    $('scanReadText').textContent = ''; $('scanOcrDetails').classList.add('hidden'); $('scanOcrDetails').open = false;
-    draw(); setBusy(false); status('카드 한 장을 드래그로 지정한 뒤 인식하세요. 이름 부분만 지정해도 됩니다.');
+  function appendRegion(quad,portrait=true) {
+    if(items.length>=MAX_SCAN_CARDS){status('목록은 최대 {n}개입니다. 추가를 마친 뒤 목록을 비워주세요.',{n:MAX_SCAN_CARDS});return null;}
+    if(currentItems().some(item=>polygonIoU(item.quad,quad)>.5))return null;
+    const bitmap=cropCard(source,quad,{portrait}),thumb=bitmap.toDataURL('image/jpeg',.65);
+    const item={id:++nextId,photo,quad,bitmap,thumb,candidates:[],chosen:null,checked:false,quantity:1,added:false,state:'pending',text:'',query:''};
+    items.push(item);activeId=item.id;return item;
   }
-
+  function useImage(image) {
+    const width=image.naturalWidth||image.width,height=image.naturalHeight||image.height;
+    const scale=Math.min(1,4096/Math.max(width,height));
+    source=document.createElement('canvas');source.width=Math.round(width*scale);source.height=Math.round(height*scale);
+    source.getContext('2d').drawImage(image,0,0,source.width,source.height);photo++;activeId=null;
+    $('scanEmpty').classList.add('hidden');$('scanPreview').classList.remove('hidden');
+    renderAll();setBusy(false);status('여러 장을 자동 검출하거나 사진 위를 드래그해 카드 영역을 추가하세요.');
+  }
   async function loadFile(file) {
-    if (!file || busy) return;
-    cancel(false); stopCamera();
-    const ticket = job;
-    if (!/^image\/(jpeg|png|webp|avif|heic|heif|bmp)$/i.test(file.type) && !/\.(jpe?g|png|webp|avif|heic|heif|bmp)$/i.test(file.name)) {
-      status('JPG, PNG, WebP 등 이미지 파일을 선택하세요.'); return;
-    }
-    if (file.size > 25 * 1024 * 1024) { status('25MB 이하의 이미지를 선택하세요.'); return; }
-    setBusy(true); status('이미지 불러오는 중…');
-    const url = URL.createObjectURL(file);
-    try {
-      const image = new Image(); image.src = url;
-      await image.decode();
-      if (ticket !== job || !dialog.open) return;
-      if (image.naturalWidth < 40 || image.naturalHeight < 20) throw new Error('small-image');
-      useImage(image);
-    } catch {
-      if (ticket === job) status('이미지를 읽지 못했습니다. HEIC 사진은 JPG 또는 PNG로 변환해주세요.');
-    } finally {
-      URL.revokeObjectURL(url);
-      if (ticket === job) setBusy(false);
-    }
+    if(!file||busy)return;
+    cancel(false);stopCamera();$('scanPreview').classList.toggle('hidden',!source);$('scanEmpty').classList.toggle('hidden',Boolean(source));const ticket=job;
+    if(!/^image\/(jpeg|png|webp|avif|heic|heif|bmp)$/i.test(file.type)&&!/\.(jpe?g|png|webp|avif|heic|heif|bmp)$/i.test(file.name)){status('JPG, PNG, WebP 등 이미지 파일을 선택하세요.');return;}
+    if(file.size>25*1024*1024){status('25MB 이하의 이미지를 선택하세요.');return;}
+    setBusy(true);status('이미지 불러오는 중…');const url=URL.createObjectURL(file);
+    try{const image=new Image();image.src=url;await image.decode();if(ticket!==job||!dialog.open)return;if(image.naturalWidth<40||image.naturalHeight<20)throw new Error('small');useImage(image);}
+    catch{if(ticket===job)status('이미지를 읽지 못했습니다. HEIC 사진은 JPG 또는 PNG로 변환해주세요.');}
+    finally{URL.revokeObjectURL(url);if(ticket===job)setBusy(false);}
   }
-
-  function position(event) {
-    const rect = canvas.getBoundingClientRect();
-    return { x: Math.max(0, Math.min(source.width, (event.clientX - rect.left) * source.width / rect.width)), y: Math.max(0, Math.min(source.height, (event.clientY - rect.top) * source.height / rect.height)) };
-  }
-  canvas.addEventListener('pointerdown', event => {
-    if (!source || busy || event.button !== 0) return;
-    canvas.setPointerCapture(event.pointerId); dragStart = position(event);
+  function position(event){const r=canvas.getBoundingClientRect();return{x:Math.max(0,Math.min(source.width,(event.clientX-r.left)*source.width/r.width)),y:Math.max(0,Math.min(source.height,(event.clientY-r.top)*source.height/r.height))};}
+  canvas.addEventListener('pointerdown',event=>{if(!source||busy||event.button!==0)return;canvas.setPointerCapture(event.pointerId);dragStart=position(event);draft=null;});
+  canvas.addEventListener('pointermove',event=>{if(!dragStart)return;const p=position(event);draft=clampCrop({x:Math.min(p.x,dragStart.x),y:Math.min(p.y,dragStart.y),width:Math.abs(p.x-dragStart.x),height:Math.abs(p.y-dragStart.y)},source.width,source.height);draw();});
+  canvas.addEventListener('pointerup',()=>{
+    if(!dragStart)return;
+    if(draft&&draft.width>35&&draft.height>20){appendRegion(boxQuad(draft.x+draft.width/2,draft.y+draft.height/2,draft.width,draft.height,0),false);}
+    else{const item=currentItems().find(item=>pointInQuad(dragStart,item.quad));if(item)activeId=item.id;}
+    dragStart=null;draft=null;renderAll();
   });
-  canvas.addEventListener('pointermove', event => {
-    if (!dragStart) return;
-    const point = position(event);
-    crop = clampCrop({ x: Math.min(point.x, dragStart.x), y: Math.min(point.y, dragStart.y), width: Math.abs(point.x - dragStart.x), height: Math.abs(point.y - dragStart.y) }, source.width, source.height);
-    draw();
-  });
-  const endCrop = () => {
-    if (!dragStart) return;
-    dragStart = null;
-    if (crop && (crop.width < 35 || crop.height < 15)) crop = null;
-    draw(); resetResults();
-  };
-  canvas.addEventListener('pointerup', endCrop); canvas.addEventListener('pointercancel', endCrop);
-  $('scanRotateBtn').addEventListener('click', () => {
-    if (!source) return;
-    const rotated = document.createElement('canvas'); rotated.width = source.height; rotated.height = source.width;
-    const ctx = rotated.getContext('2d'); ctx.translate(rotated.width, 0); ctx.rotate(Math.PI / 2); ctx.drawImage(source, 0, 0);
-    source = rotated; crop = null; resetResults(); draw();
-  });
-  $('scanResetCropBtn').addEventListener('click', () => { crop = null; resetResults(); draw(); });
+  canvas.addEventListener('pointercancel',()=>{dragStart=null;draft=null;draw();});
+  $('scanWholeBtn').addEventListener('click',()=>{if(!source||busy)return;appendRegion(boxQuad(source.width/2,source.height/2,source.width,source.height,0),false);renderAll();});
+  $('scanRotateBtn').addEventListener('click',()=>{const item=active();if(!item||busy||item.added)return;item.bitmap=rotateCard(item.bitmap,90);item.thumb=item.bitmap.toDataURL('image/jpeg',.65);item.chosen=null;item.candidates=[];item.checked=false;item.state='pending';item.text='';item.query='';renderAll();});
 
   async function startCamera() {
-    if (busy || cameraStarting) return;
-    cancel(false); stopCamera();
-    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-      status('카메라는 HTTPS 또는 localhost에서 사용할 수 있습니다. 이미지 불러오기도 이용할 수 있습니다.'); return;
-    }
-    const ticket = job;
-    cameraStarting = true; $('scanCameraBtn').disabled = true;
-    $('scanRecognizeBtn').disabled = true;
-    status('카메라 권한을 허용해주세요.');
-    try {
-      const media = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
-      if (ticket !== job || !dialog.open) { media.getTracks().forEach(track => track.stop()); return; }
-      stream = media; video.srcObject = media;
-      $('scanLive').classList.remove('hidden'); $('scanPreview').classList.add('hidden'); $('scanEmpty').classList.add('hidden');
-      await video.play();
-      if (ticket !== job) return;
-      const region = cameraCrop();
-      Object.assign($('scanCameraGuide').style, { left: `${region.x / video.videoWidth * 100}%`, top: `${region.y / video.videoHeight * 100}%`, width: `${region.width / video.videoWidth * 100}%`, height: `${region.height / video.videoHeight * 100}%` });
-      status('카드 한 장을 테두리에 맞추고 촬영하세요.');
-    } catch (error) {
-      if (ticket !== job) return;
-      stopCamera();
-      $('scanPreview').classList.toggle('hidden', !source); $('scanEmpty').classList.toggle('hidden', Boolean(source));
-      status(error.name === 'NotAllowedError' ? '카메라 권한이 거부되었습니다. 브라우저 권한을 변경하거나 이미지를 불러오세요.' : '카메라를 사용할 수 없습니다. 연결을 확인하거나 이미지를 불러오세요.');
-    } finally {
-      if (ticket === job) { cameraStarting = false; $('scanCameraBtn').disabled = false; $('scanRecognizeBtn').disabled = Boolean(stream) || !source; }
-    }
+    if(busy||cameraStarting)return;cancel(false);stopCamera();
+    if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia){status('카메라는 HTTPS 또는 localhost에서 사용할 수 있습니다. 이미지 불러오기도 이용할 수 있습니다.');return;}
+    const ticket=job;cameraStarting=true;$('scanCaptureBtn').disabled=true;setBusy(true);status('카메라 권한을 허용해주세요.');
+    try{
+      const media=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:3840},height:{ideal:2160}}});
+      if(ticket!==job||!dialog.open){media.getTracks().forEach(track=>track.stop());return;}
+      stream=media;video.srcObject=media;$('scanLive').classList.remove('hidden');$('scanPreview').classList.add('hidden');$('scanEmpty').classList.add('hidden');await video.play();
+      if(ticket!==job)return;$('scanCaptureBtn').disabled=false;status('카드들을 겹치지 않게 펼치고 이름이 보이도록 촬영하세요.');
+    }catch(error){if(ticket===job){stopCamera();$('scanPreview').classList.toggle('hidden',!source);$('scanEmpty').classList.toggle('hidden',Boolean(source));status(error.name==='NotAllowedError'?'카메라 권한이 거부되었습니다. 브라우저 권한을 변경하거나 이미지를 불러오세요.':'카메라를 사용할 수 없습니다. 연결을 확인하거나 이미지를 불러오세요.');}}
+    finally{if(ticket===job){cameraStarting=false;setBusy(false);}}
   }
+  $('scanCaptureBtn').addEventListener('click',()=>{if(!video.videoWidth||!stream)return;const image=document.createElement('canvas');image.width=video.videoWidth;image.height=video.videoHeight;image.getContext('2d').drawImage(video,0,0);stopCamera();useImage(image);});
+  $('scanStopCameraBtn').addEventListener('click',()=>{cancel(false);stopCamera();$('scanPreview').classList.toggle('hidden',!source);$('scanEmpty').classList.toggle('hidden',Boolean(source));setBusy(false);status('카메라를 닫았습니다.');});
 
-  function cameraCrop() {
-    const h = Math.min(video.videoHeight * .84, video.videoWidth * .84 * 88 / 63), w = h * 63 / 88;
-    return { x: (video.videoWidth - w) / 2, y: (video.videoHeight - h) / 2, width: w, height: h };
+  function assertActive(ticket){if(ticket!==job||!dialog.open)throw new Error('cancelled');}
+  async function detectRegions(ticket) {
+    if(!source)return 0;
+    const detected=await detector.detect(source,{detailed:$('scanDetailed').checked,onProgress:(i,total)=>status('카드 위치 찾는 중… {n}/{total}',{n:i+1,total},4+i/total*18)});assertActive(ticket);
+    let count=0;for(const detection of detected)if(appendRegion(detection.quad))count++;
+    activeId=currentItems().find(item=>!item.added)?.id??activeId;renderAll();return count;
   }
-  $('scanCaptureBtn').addEventListener('click', () => {
-    if (!video.videoWidth || !stream) return;
-    const image = document.createElement('canvas'); image.width = video.videoWidth; image.height = video.videoHeight;
-    image.getContext('2d').drawImage(video, 0, 0);
-    const region = cameraCrop(); stopCamera(); useImage(image, region);
+  $('scanDetectBtn').addEventListener('click',async()=>{
+    if(busy||!source)return;const ticket=++job;setBusy(true);
+    try{await detectRegions(ticket);status(currentItems().length?'검출된 영역을 확인하세요. 누락된 카드는 드래그로 추가할 수 있습니다.':'카드를 찾지 못했습니다. 드래그로 영역을 지정하거나 한 장 모드를 이용하세요.');}
+    catch(error){if(ticket===job)status('자동 검출을 완료하지 못했습니다. 드래그로 카드 영역을 지정해 계속할 수 있습니다.');}
+    finally{if(ticket===job){detector.cancel();setBusy(false);}}
   });
-  $('scanStopCameraBtn').addEventListener('click', () => {
-    job++; stopCamera(); $('scanCameraBtn').disabled = false;
-    $('scanRecognizeBtn').disabled = !source;
-    $('scanPreview').classList.toggle('hidden', !source); $('scanEmpty').classList.toggle('hidden', Boolean(source));
-    status('카메라를 닫았습니다.');
-  });
-
-  async function ensureIndex() {
-    const cards = await getCatalog();
-    if (cards !== indexedCards) { index = createScanIndex(cards); indexedCards = cards; }
+  async function ensureIndex(){const cards=await getCatalog();if(cards!==indexedCards){index=createScanIndex(cards);indexedCards=cards;}}
+  function ocrImage(bitmap,titleOnly=true,variant=0){
+    const portrait=bitmap.height/bitmap.width>.75;
+    const strips=[[.035,.035,.85,.075],[.065,.035,.795,.075],[.065,.025,.795,.065],[.065,.06,.795,.05]];
+    const [left,top,width,height]=strips[variant]||strips[0];
+    const r=titleOnly&&portrait?{x:bitmap.width*left,y:bitmap.height*top,width:bitmap.width*width,height:bitmap.height*height}:{x:0,y:0,width:bitmap.width,height:bitmap.height};
+    const out=document.createElement('canvas'),scale=Math.min(3,1500/r.width),padding=20;
+    const w=Math.max(1,Math.round(r.width*scale)),h=Math.max(1,Math.round(r.height*scale));out.width=w+padding*2;out.height=h+padding*2;
+    const ctx=out.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,out.width,out.height);
+    ctx.drawImage(bitmap,r.x,r.y,r.width,r.height,padding,padding,w,h);return out;
   }
-
-  function prepareOcrImage(titleOnly) {
-    let region = crop || { x: 0, y: 0, width: source.width, height: source.height };
-    // Card title is near the top. A wide crop is already a user-selected title strip.
-    if (titleOnly && region.height / region.width > .75) region = {
-      x: region.x + region.width * .045, y: region.y + region.height * .035,
-      width: region.width * .83, height: region.height * .075
-    };
-    const output = document.createElement('canvas');
-    const scale = Math.min(3, 1600 / region.width);
-    output.width = Math.round(region.width * scale); output.height = Math.round(region.height * scale);
-    const ctx = output.getContext('2d');
-    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, output.width, output.height);
-    ctx.drawImage(source, region.x, region.y, region.width, region.height, 0, 0, output.width, output.height);
-    return output;
-  }
-
-  async function recognize() {
-    if (!source || busy) return;
-    stopCamera(); resetResults();
-    $('scanOcrDetails').classList.add('hidden'); $('scanReadText').textContent = '';
-    const ticket = ++job;
-    setBusy(true); status('카드 DB와 인식 모델 준비 중…', {}, 2);
-    let timer, timedOut = false;
-    const assertActive = () => { if (ticket !== job || !dialog.open) throw new Error('cancelled'); };
-    const work = async () => {
-      await ensureIndex(); assertActive();
-      const { default: Tesseract } = await import('./vendor/tesseract/tesseract.esm.min.js'); assertActive();
-      const { createWorker, PSM } = Tesseract;
-      const language = $('scanLanguage').value;
-      const langs = language === 'ko' ? 'kor' : language === 'ja' ? 'jpn' : 'eng';
-      const created = await createWorker(langs, 1, {
-        workerPath: new URL('worker.min.js', OCR_ROOT).href,
-        corePath: new URL('core/', OCR_ROOT).href,
-        langPath: new URL('lang/', OCR_ROOT).href.replace(/\/$/, ''),
-        workerBlobURL: false,
-        logger: message => {
-          if (ticket !== job) return;
-          const reading = message.status === 'recognizing text';
-          status(reading ? '카드 이름 읽는 중…' : '인식 모델 불러오는 중…', {}, reading ? 30 + (message.progress || 0) * 50 : 8 + (message.progress || 0) * 20);
+  function mergeHits(hits){const map=new Map();for(const hit of hits.sort((a,b)=>b.score-a.score)){const key=hit.card.oracle_id||hit.card.id||hit.card.name;if(!map.has(key))map.set(key,hit);}return[...map.values()].slice(0,5);}
+  async function readItem(item,ocr,PSM,language,ticket) {
+    let best={text:'',hits:[],bitmap:item.bitmap,confidence:0};
+    const trials=[];
+    // An OBB has no top/bottom semantics. Test both orientations and a tighter title strip.
+    const orientations=[item.bitmap,rotateCard(item.bitmap)];
+    outer: for(const bitmap of orientations) {
+      for(const variant of [0,1,2,3]) {
+        await ocr.setParameters({tessedit_pageseg_mode:PSM.SINGLE_LINE,preserve_interword_spaces:'1'});
+        const result=await ocr.recognize(ocrImage(bitmap,true,variant));assertActive(ticket);
+        const text=result.data.text,hits=matchScanNames(text,index),confidence=result.data.confidence||0;
+        trials.push({text,hits,bitmap,confidence});
+        const merit=hits[0]?.score||0,bestMerit=best.hits[0]?.score||0;
+        if(merit>bestMerit||(merit===bestMerit&&confidence>best.confidence))best={text,hits,bitmap,confidence};
+        if(hits[0]?.exactName)break outer;
+      }
+    }
+    if(!best.hits[0]?.exactName&&language==='en'){
+      for(const bitmap of orientations){
+        await ocr.setParameters({tessedit_pageseg_mode:PSM.SPARSE_TEXT});
+        const result=await ocr.recognize(ocrImage(bitmap,false));assertActive(ticket);
+        const hits=matchScanNames(result.data.text,index);
+        if((hits[0]?.score||0)>(best.hits[0]?.score||0))best={text:result.data.text,hits,bitmap,confidence:result.data.confidence||0};
+        if(best.hits[0]?.exactName)break;
+      }
+    }
+    const texts=language==='en'?[best.text]:[...trials].sort((a,b)=>b.confidence-a.confidence).map(trial=>trial.text);
+    const validQuery=q=>language==='en'||(language==='ko'?/[가-힣]/.test(q):/[\u3040-\u30ff\u3400-\u9fff]/.test(q));
+    const queries=[...new Set(texts.flatMap(text=>scanNameQueries(text).filter(validQuery).slice(0,language==='en'?3:1)))].slice(0,language==='en'?3:8);
+    if(language!=='en'||!best.hits.length){
+      try{
+        for(let offset=0;offset<queries.length;offset+=3){
+          const online=await searchNames(queries.slice(offset,offset+3),language);assertActive(ticket);
+          const onlineHits=matchScanNames(language==='en'?best.text:queries.join('\n'),createScanIndex(online));
+          best.hits=mergeHits([...best.hits,...onlineHits]);
+          if(best.hits[0]?.exactName)break;
         }
-      });
-      if (ticket !== job || !dialog.open) { await created.terminate(); return; }
-      worker = created;
-      await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE, preserve_interword_spaces: '1' });
-      const title = await worker.recognize(prepareOcrImage(true)); assertActive();
-      let text = title.data.text;
-      let hits = matchScanNames(text, index);
-      if (!hits.length || hits[0].score < .90) {
-        await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
-        const full = await worker.recognize(prepareOcrImage(false)); assertActive();
-        text = `${text}\n${full.data.text}`;
-        hits = matchScanNames(text, index);
-      }
-      const nameQueries = scanNameQueries(text).filter(q => language === 'en' || (language === 'ko' ? /[가-힣]/.test(q) : /[\u3040-\u30ff\u3400-\u9fff]/.test(q)));
-      $('scanNameInput').value = hits[0]?.matchedName || nameQueries[0] || '';
-      $('scanReadText').textContent = text.trim() || t('읽힌 글자가 없습니다.');
-      $('scanOcrDetails').classList.remove('hidden');
-      if (language !== 'en' || !hits.length) {
-        status('카드 이름 대조 중…', {}, 90);
-        const online = await searchNames(nameQueries.slice(0, 3), language); assertActive();
-        const onlineHits = matchScanNames(text, createScanIndex(online));
-        hits = mergeHits([...hits, ...onlineHits]);
-      }
-      assertActive(); candidates = hits; selected = null; renderResults();
-      if (hits.length) $('scanNameInput').value = hits[0].card.printed_name || hits[0].matchedName || hits[0].card.name;
-      status(hits.length ? '후보의 이름과 이미지를 확인하고 추가할 카드를 선택하세요.' : '일치하는 카드를 찾지 못했습니다. 이름 영역을 다시 지정하거나 아래에서 이름을 수정해 검색하세요.');
-    };
-    try {
-      await Promise.race([work(), new Promise((_, reject) => { timer = setTimeout(() => { timedOut = true; reject(new Error('timeout')); }, 120_000); })]);
-    } catch (error) {
-      if (ticket === job) {
-        console.warn('Card recognition failed:', error?.message || error);
-        if (timedOut) { cancel(false); status('인식 시간이 초과되었습니다. 작은 이미지로 다시 시도하거나 이름으로 검색하세요.'); }
-        else status('인식을 완료하지 못했습니다. 연결 상태를 확인하거나 이름으로 검색하세요.');
-      }
-    } finally {
-      clearTimeout(timer);
-      if (ticket === job) {
-        if (worker) { await worker.terminate().catch(() => {}); worker = null; }
-        setBusy(false);
-      }
+        if(language!=='en'&&best.hits.length){
+          const matched=normalizeScanName(best.hits[0].matchedName);
+          const matchingTrial=trials.find(trial=>scanNameQueries(trial.text).some(q=>normalizeScanName(q)===matched));
+          if(matchingTrial){best.bitmap=matchingTrial.bitmap;best.text=matchingTrial.text;}
+        }
+      }catch(error){assertActive(ticket);item.lookupFailed=true;}
     }
+    assertActive(ticket);item.bitmap=best.bitmap;item.thumb=best.bitmap.toDataURL('image/jpeg',.65);item.text=(language==='en'?best.text:trials.map(trial=>trial.text.trim()).filter(Boolean).join('\n\n')).trim();item.candidates=best.hits;
+    item.chosen=best.hits[0]?.exactName?best.hits[0]:null;item.checked=false;item.query=item.chosen?.card.printed_name||item.chosen?.card.name||queries[0]||'';item.state=item.chosen?'ready':'unmatched';
   }
-
-  function mergeHits(hits) {
-    const result = new Map();
-    for (const hit of hits.sort((a, b) => b.score - a.score)) {
-      const key = hit.card.oracle_id || hit.card.id || hit.card.name;
-      if (!result.has(key)) result.set(key, hit);
-    }
-    return [...result.values()].slice(0, 5);
-  }
-
-  $('scanNameForm').addEventListener('submit', async event => {
-    event.preventDefault();
-    const name = $('scanNameInput').value.trim();
-    if (busy || name.length < 2) return;
-    stopCamera(); const ticket = ++job; resetResults(); setBusy(true); status('카드 이름 대조 중…', {}, 15);
-    try {
-      await ensureIndex(); if (ticket !== job) return;
-      let hits = matchScanNames(name, index);
-      if (!hits.length || hits[0].score < .99 || $('scanLanguage').value !== 'en') {
-        const cards = await searchNames([name], $('scanLanguage').value); if (ticket !== job) return;
-        // Explicit manual search can show partial-name results too.
-        const matched = matchScanNames(name, createScanIndex(cards));
-        hits = mergeHits([...hits, ...matched, ...cards.map(card => ({ card, score: .5 }))]);
+  async function recognize(onlyActive=false) {
+    if(busy||(!source&&!items.length))return;stopCamera();const ticket=++job;setBusy(true);
+    let timer,timeout=false;
+    try{
+      if(!onlyActive&&source&&!currentItems().length)await detectRegions(ticket);
+      assertActive(ticket);
+      const targets=onlyActive?[active()].filter(item=>item&&!item.added):items.filter(item=>!item.added&&['pending','error'].includes(item.state));
+      if(!targets.length){status(items.length?'미인식 카드가 없습니다. 다시 읽을 카드를 선택하거나 새 사진을 불러오세요.':'카드를 찾지 못했습니다. 드래그로 영역을 지정하거나 한 장 모드를 이용하세요.');return;}
+      status('카드 DB와 인식 모델 준비 중…',{},23);await ensureIndex();assertActive(ticket);
+      const {default:Tesseract}=await import('./vendor/tesseract/tesseract.esm.min.js');assertActive(ticket);
+      const language=$('scanLanguage').value;
+      const create=Tesseract.createWorker(language==='ko'?'kor':language==='ja'?'jpn':'eng',1,{workerPath:new URL('worker.min.js',OCR_ROOT).href,corePath:new URL('core/',OCR_ROOT).href,langPath:new URL('lang/',OCR_ROOT).href.replace(/\/$/,''),workerBlobURL:false});
+      timer=setTimeout(()=>{timeout=true;cancel(false);status('인식 시간이 초과되었습니다. 완료된 결과를 확인하고 남은 카드를 다시 읽어주세요.');},120000);
+      const created=await create;
+      if(ticket!==job||!dialog.open){await created.terminate();return;}
+      clearTimeout(timer);worker=created;
+      for(const [i,item] of targets.entries()){
+        assertActive(ticket);activeId=item.id;item.state='reading';item.checked=false;renderAll();status('카드 읽는 중… {n}/{total}',{n:i+1,total:targets.length},25+i/targets.length*70);
+        const task=readItem(item,created,Tesseract.PSM,language,ticket);
+        await Promise.race([task,new Promise((_,reject)=>{timer=setTimeout(()=>{timeout=true;reject(new Error('timeout'));},90000);})]);
+        clearTimeout(timer);assertActive(ticket);renderAll();
       }
-      candidates = hits; renderResults();
-      status(hits.length ? '후보의 이름과 이미지를 확인하고 추가할 카드를 선택하세요.' : '일치하는 카드를 찾지 못했습니다. 이름 영역을 다시 지정하거나 아래에서 이름을 수정해 검색하세요.');
-    } catch {
-      if (ticket === job) status('카드 검색에 실패했습니다. 연결 상태를 확인하고 다시 시도해주세요.');
-    } finally { if (ticket === job) setBusy(false); }
+      status('인식이 끝났습니다. 카드별 후보와 수량을 확인하고 선택한 카드들을 추가하세요.');
+    }catch(error){
+      if(ticket===job){if(timeout){cancel(false);status('인식 시간이 초과되었습니다. 완료된 결과를 확인하고 남은 카드를 다시 읽어주세요.');}
+        else{for(const item of items)if(item.state==='reading')item.state='error';status('인식을 완료하지 못했습니다. 검출 영역을 확인하거나 이름으로 검색하세요.');console.warn('Scan:',error.message);}}
+    }finally{clearTimeout(timer);if(ticket===job){detector.cancel();if(worker){await worker.terminate().catch(()=>{});worker=null;}setBusy(false);renderAll();}}
+  }
+  $('scanNameForm').addEventListener('submit',async event=>{
+    event.preventDefault();const item=active(),name=$('scanNameInput').value.trim();if(!item||item.added||busy||name.length<2)return;
+    const ticket=++job;setBusy(true);status('카드 이름 대조 중…',{},20);
+    try{await ensureIndex();assertActive(ticket);let hits=matchScanNames(name,index);
+      if(!hits.length||hits[0].score<.99||$('scanLanguage').value!=='en'){const cards=await searchNames([name],$('scanLanguage').value);assertActive(ticket);hits=mergeHits([...hits,...matchScanNames(name,createScanIndex(cards)),...cards.map(card=>({card,score:.5}))]);}
+      item.candidates=hits;item.chosen=null;item.checked=false;item.query=name;item.state='unmatched';renderAll();status(hits.length?'후보의 이름과 이미지를 확인하고 추가할 카드를 선택하세요.':'일치하는 카드를 찾지 못했습니다. 이름 영역을 다시 지정하거나 아래에서 이름을 수정해 검색하세요.');
+    }catch{if(ticket===job)status('카드 검색에 실패했습니다. 연결 상태를 확인하고 다시 시도해주세요.');}finally{if(ticket===job)setBusy(false);}
   });
-
-  $('scanAddBtn').addEventListener('click', () => {
-    if (!selected || busy) return;
-    const amount = Number($('scanQuantity').value);
-    if (!Number.isInteger(amount) || amount < 1 || amount > Number($('scanQuantity').max)) {
-      $('scanQuantity').reportValidity(); return;
+  function updateQuantity(validate=false){
+    const item=active(),quantity=Number($('scanQuantity').value);if(!item||item.added)return;
+    if(!Number.isInteger(quantity)||quantity<1||quantity>99){if(validate){$('scanQuantity').reportValidity();$('scanQuantity').value=item.quantity;}return;}
+    item.quantity=quantity;renderQueue();
+  }
+  $('scanQuantity').addEventListener('input',()=>updateQuantity());
+  $('scanQuantity').addEventListener('change',()=>updateQuantity(true));
+  function addItems(targets){
+    if(busy)return;const destination=$('scanTarget').value;let added=0,failed=0;
+    for(const item of targets){if(item.added||!item.chosen)continue;
+      if(destination==='commander'&&item.quantity!==1){item.state='blocked';failed++;continue;}
+      if(addCard(item.chosen.card,destination,item.quantity)){item.added=true;item.checked=false;added+=item.quantity;}
+      else{item.state='blocked';failed++;}
     }
-    const card = selected.card;
-    if (addCard(card, $('scanTarget').value, amount)) {
-      status('덱에 추가했습니다: {name} ×{count}', { name: card.name, count: amount });
-      selected = null; renderResults(); onAdded();
-    } else status('덱에 추가하지 못했습니다. 포맷의 중복 제한 또는 커맨더 조건을 확인하세요.');
+    if(added)onAdded();renderAll();status('덱에 {count}장 추가했습니다. 추가하지 못한 항목: {failed}개',{count:added,failed});
+  }
+  $('scanAddBtn').addEventListener('click',()=>{const item=active();if(item)addItems([item]);});
+  $('scanBatchAddBtn').addEventListener('click',()=>addItems(selectedScanItems(items)));
+  $('scanSelectAll').addEventListener('click',()=>{for(const item of items)item.checked=Boolean(item.chosen&&!item.added);renderAll();});
+  $('scanSelectNone').addEventListener('click',()=>{for(const item of items)item.checked=false;renderAll();});
+  $('scanClearQueueBtn').addEventListener('click',()=>{if(busy)return;items=[];activeId=null;renderAll();status('스캔 목록을 비웠습니다. 덱에 추가한 카드는 유지됩니다.');});
+  $('scanUploadBtn').addEventListener('click',()=>$('scanFile').click());
+  $('scanFile').addEventListener('change',event=>{loadFile(event.target.files[0]);event.target.value='';});
+  $('scanCameraBtn').addEventListener('click',startCamera);
+  $('scanRecognizeBtn').addEventListener('click',()=>recognize());
+  $('scanReadActiveBtn').addEventListener('click',()=>recognize(true));
+  $('scanCancelBtn').addEventListener('click',()=>{cancel();if(cameraStarting||stream)stopCamera();});
+  $('scanCloseBtn').addEventListener('click',()=>dialog.close());
+  dialog.addEventListener('close',()=>{
+    cancel(false);stopCamera();source=null;items=[];activeId=null;photo=0;nextId=0;draft=null;dragStart=null;canvas.width=canvas.height=1;
+    $('scanPreview').classList.add('hidden');$('scanEmpty').classList.remove('hidden');renderAll();
   });
-
-  $('scanUploadBtn').addEventListener('click', () => $('scanFile').click());
-  $('scanFile').addEventListener('change', event => { loadFile(event.target.files[0]); event.target.value = ''; });
-  $('scanCameraBtn').addEventListener('click', startCamera);
-  $('scanRecognizeBtn').addEventListener('click', recognize);
-  $('scanCancelBtn').addEventListener('click', () => cancel());
-  $('scanTarget').addEventListener('change', syncTargets);
-  $('scanLanguage').addEventListener('change', resetResults);
-  $('scanCloseBtn').addEventListener('click', () => dialog.close());
-  dialog.addEventListener('close', () => {
-    cancel(false); stopCamera(); source = null; crop = null; dragStart = null;
-    canvas.width = 1; canvas.height = 1;
-    $('scanPreview').classList.add('hidden'); $('scanEmpty').classList.remove('hidden');
-    $('scanOcrDetails').classList.add('hidden'); $('scanReadText').textContent = '';
-    $('scanNameInput').value = ''; resetResults();
-  });
-  dialog.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); });
-  dialog.addEventListener('drop', event => {
-    if (event.dataTransfer.files.length) { event.preventDefault(); loadFile(event.dataTransfer.files[0]); }
-  });
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && (stream || cameraStarting)) {
-      job++; stopCamera(); $('scanCameraBtn').disabled = false;
-      $('scanRecognizeBtn').disabled = !source;
-      $('scanPreview').classList.toggle('hidden', !source); $('scanEmpty').classList.toggle('hidden', Boolean(source));
-      status('카메라를 닫았습니다.');
-    }
-  });
-  window.addEventListener('pagehide', () => { cancel(false); stopCamera(); });
-  $('scanBtn').addEventListener('click', () => {
-    syncTargets(); setBusy(false); status('사진을 불러오거나 카메라로 카드 한 장을 촬영하세요.'); dialog.showModal();
-  });
-  return { translate() { syncTargets(); renderResults(); if (lastStatus) status(lastStatus, statusArgs); } };
+  dialog.addEventListener('dragover',event=>{if(event.dataTransfer.types.includes('Files'))event.preventDefault();});
+  dialog.addEventListener('drop',event=>{if(event.dataTransfer.files.length){event.preventDefault();loadFile(event.dataTransfer.files[0]);}});
+  document.addEventListener('visibilitychange',()=>{if(document.hidden&&(stream||cameraStarting)){cancel(false);stopCamera();$('scanPreview').classList.toggle('hidden',!source);$('scanEmpty').classList.toggle('hidden',Boolean(source));setBusy(false);status('카메라를 닫았습니다.');}});
+  window.addEventListener('pagehide',()=>{cancel(false);stopCamera();});
+  $('scanBtn').addEventListener('click',()=>{syncTargets();renderAll();setBusy(false);status('여러 카드가 보이는 사진을 불러오거나 카메라로 촬영하세요.');dialog.showModal();});
+  return{translate(){syncTargets();renderAll();if(lastStatus)status(lastStatus,statusArgs,lastProgress);}};
 }

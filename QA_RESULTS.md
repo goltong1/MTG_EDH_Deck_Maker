@@ -1,11 +1,47 @@
-# v4.3 verification
+# Deck Canvas v4.4 — 검증 기록
 
-- Node.js 22.23.4: `npm run check` passed. Deck-rule assertions and 28 regression tests passed, including modern/legacy Scryfall bulk formats, retry/error handling, card grouping, filters, bilingual strings, OCR name normalization, short translated names, face-alias ordering and crop bounds.
-- Browser UI: black theme, Korean/English labels, card/text deck views, automatic type grouping, and sideboard directly below the main deck verified. A 60-card Modern test list with 15-card sideboard passed the app's basic deck check.
-- Image upload: public Scryfall images for Sol Ring and Lightning Bolt produced selectable candidates and were added to the main deck/sideboard. The Korean printed Murder image was recognized after improving title-line segmentation and removing OCR mana-symbol noise. Its English card identity was added to the deck.
-- Quantity and export: Commander duplicate prevention verified. Scanned Murder and sideboard Lightning Bolt quantities appeared correctly in the copied full deck list.
-- Camera: no physical camera is available in the test environment. The unavailable-camera message was verified. A temporary canvas-backed MediaStream tested preview → capture → OCR (Cultivate), recognition cancellation, and track termination after capture and after closing the dialog. Temporary fixtures are excluded from this package. Physical phone camera quality, autofocus, permission prompts and device-specific orientation still need device testing.
-- Mobile: 360 px iframe viewport checked, with no horizontal page or scanner-dialog overflow; the header fits one action row. Deck/text and scanner controls remain reachable.
-- Japanese: model loading and the no-match/manual-correction path were exercised. A furigana-bearing Lightning Bolt printing was not recognized reliably; the option is marked β. No broad multilingual or real-world accuracy benchmark is claimed.
+검증일: 2026-11-11. 이 문서는 수행한 검사와 범위를 구분합니다. 합성 예제 성공률을 실제 카메라 정확도로 일반화하지 않습니다.
 
-These are functional smoke tests, not a measured recognition-accuracy claim. OCR quality depends on the photograph and typography; candidate confirmation remains mandatory.
+## 자동 검사
+
+- Node **22.23.4**에서 `npm run check` 통과: 37개 node:test 검사 및 별도 deck-rules 검사, 앱/검출 Worker/스캐너/Service Worker/DB 빌더 문법 검사.
+- 기존 Scryfall gzip JSONL·legacy JSON·429/503 재시도·잘못된 메타데이터 처리 회귀 검사 유지.
+- 카드 유형 분류, MDFC/Adventure 앞면 처리, 한영 UI 문자열, 시각 필터 검사 유지.
+- 회전 다각형 면적/IoU, 중첩 타일 중복 억제와 인접 카드 유지, MTG/Pokemon 클래스 분리, letterbox 역변환, 타일 경계 커버리지 검사 추가.
+- 같은 이름의 물리적 카드 여러 개를 유지하고, 미확정·이미 추가한 항목·잘못된 수량을 일괄 대상에서 제외하는 검사.
+- OCR 카드 테두리 중괄호, 통화 문자처럼 읽힌 마나 기호, 한국어 제목 뒤 프레임 문자 회귀 검사.
+- 동봉한 ONNX/OCR/WASM 파일의 SHA-256이 각 ASSETS.json과 일치함을 확인.
+
+## 브라우저에서 실제 모델 실행
+
+모든 아래 인식은 모의 결과 JSON이 아니라 배포한 ONNX와 Tesseract WASM을 실행했습니다.
+
+| 시험 | 관찰한 결과 |
+| --- | --- |
+| 서로 다른 영문 카드 6장을 배치한 이미지 | 6개 검출. Sol Ring, Lightning Bolt, Cultivate, Counterspell, Llanowar Elves, Command Tower 이름 일치. 옆으로 눕힌 카드와 180° 뒤집은 카드 포함 |
+| 전체 + 중첩 4개 영역 상세 검출 | 5회 추론 결과를 중복 제거하여 카드 수를 6개로 유지 |
+| 동일 Lightning Bolt 두 장 사진 | 2개 항목 유지. 기존 6장 사진 결과에 누적해 총 8개 표시 |
+| 표준 프레임 한국어 살인 / 부인 두 장 | 2개 검출 및 Murder / Negate 이름 일치. 부인은 180° 뒤집힌 사진 |
+| 수동 누락 복구 | 검출 항목을 제거한 뒤 실제 마우스 드래그로 영역 추가, 한국어 살인 재인식 성공 |
+| 일괄 추가와 부분 실패 | 6개 선택 중 기존 4장 제한에 걸린 Lightning Bolt 1개는 실패 상태 유지, 나머지 5장은 덱에 추가·자동 유형 분류·저장 |
+| 수량 즉시 반영 | 선택된 6개 영역 중 한 항목 수량을 2로 바꾸면 합계 7장, 1로 복구하면 6장 표시 |
+| 이미 추가한 항목 | 추가 완료 표시와 체크/재추가 비활성화 |
+| 인식 취소 | Worker 중단 후 기존 6개 결과 유지 |
+| 카드 없는 이미지 | 0개 검출. 임의 카드 자동 추가 없음 |
+| 수동 대안 | 한 장 모드로 영역 지정 후 Sol Ring 이름 검색 및 후보 표시 |
+| 360px 모바일 / English | 실제 iframe 콘텐츠 너비 354px, 스캐너 310px에서 가로 넘침 없음. 버튼·상태·안내 영문 표시 |
+
+## 카메라 검사 범위
+
+카메라 API에는 실제 Canvas MediaStream을 공급했습니다. 예제 6장 사진의 영상 → 미리보기 → 촬영 → 1240×1060 전체 프레임 캡처 → 6장 검출·이름 인식까지 확인했습니다. 촬영 후 트랙이 `ended`, 카메라를 다시 열고 창을 닫은 뒤에도 `ended`로 바뀌는 것을 확인했습니다.
+
+이는 영상/권한 분기 이후의 앱 흐름 시험입니다. **물리적인 스마트폰 카메라, 자동초점, 실제 조명·반사·손떨림 환경은 시험하지 않았습니다.**
+
+## 확인된 한계
+
+- 초기 테스트의 한국어 Negate 쇼케이스 프레임은 카드 내부의 텍스트 상자를 카드로 잘못 검출했습니다. 번호 박스 확인, 해당 항목 제거 후 수동 영역 지정 또는 표준 프레임/선명한 사진이 필요합니다.
+- 짧은 번역 이름과 마나 기호를 혼동하는 OCR 오류를 보완했지만, 모든 카드·언어·프레임의 정확도를 보장하지 않습니다.
+- 임의 실물 덱 전체, 겹친 카드 더미, 100장 단일 사진에 대한 정확도 벤치마크를 수행하지 않았습니다.
+- 회전 사각형 보정이며 완전한 원근 보정/이미지 임베딩 카드 식별은 아닙니다. 세트·포일·화면 수량 배지는 판별하지 않습니다.
+- 일본어는 이전 버전부터 실험적 지원이며 이번 버전에서 별도 정확도 개선을 검증하지 않았습니다.
+- 브라우저 QA용 카메라 페이지, 예제 카드 합성 이미지, 모바일 iframe은 납품 ZIP에서 제외했습니다.
